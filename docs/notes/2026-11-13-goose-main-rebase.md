@@ -1,0 +1,3 @@
+# Goose rebase onto updated main
+
+The user started another rebase of Goose tip 89c06dd onto main d63da77. [Task 0056](../tasks/current/0056-goose-main-rebase.md) is resumed for this operation. The first replay (59b014e) stopped only in PLAN.md; its additive conflict is resolved in the working tree, preserving the active task and upstream entries. Whitespace/conflict-marker validation passed. Staging failed because .git is mounted read-only, so the user must stage PLAN.md, Task 0056 and this note and run git rebase --continue locally. Three topic commits remain; source integration and final tests have not yet been reached. Preserve newer main's Python-venv launch/restart and question/Whiteboard changes. Existing ledger-ID collisions remain a separate unresolved issue.

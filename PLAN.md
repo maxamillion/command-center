@@ -5,7 +5,9 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 ## Direction and latest milestone
 
 - [Plan 0001: project overview](docs/plans/0001-project-overview.md)
+- [Plan 0002: Goose agent parity](docs/plans/0002-goose-agent-parity.md#execution-tracking-and-handoff) — resumable tracker prepared; implementation not started/authorized.
 - [Milestone 0001: maintainable project records](docs/milestones/0001-maintainable-project-records.md) — complete.
+- [Milestone 0002: Goose observation](docs/milestones/0002-goose-native-observation.md) / [0003: full Goose parity](docs/milestones/0003-goose-full-agent-parity.md) — proposed; distinct acceptance gates.
 
 ## Active work
 
@@ -14,6 +16,7 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 
 
 
+- [Task 0056: Rebase Goose support onto main](docs/tasks/current/0056-goose-main-rebase.md) — resolving conflicts; preserve upstream and Goose records.
 
 - [Task 0054: Whiteboard attachment release and harness check](docs/tasks/pending/0054-whiteboard-attachment-release-and-harness-check.md) — deployment complete; real-harness delivery validation awaits separate authorization.
 
@@ -25,6 +28,12 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 
 
 - [Task 0009: Pi first-message receipts](docs/tasks/current/0009-pi-first-message-receipts.md) — CC dev; fix deployed, one legacy receipt archive choice pending.
+
+## Planned and blocked Goose work
+
+- [Task 0024: scope/authorization decision](docs/tasks/pending/0024-goose-implementation-scope.md) — next action; no implementation choice accepted.
+- [Execution tracker: tasks 0024–0049](docs/plans/0002-goose-agent-parity.md#execution-tracking-and-handoff) — 24 pending, 2 blocked; task directories/checklists are authoritative.
+- [Task 0035: actual native evidence producer](docs/tasks/blocked/0035-goose-native-runtime-integration.md) and [Task 0046: native approval channel](docs/tasks/blocked/0046-goose-guarded-approvals.md) — external dependencies; no integration selected.
 
 ## Completed work
 
@@ -119,6 +128,9 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 - [Task 0023: desktop header theme selector](docs/tasks/done/0023-desktop-header-theme-selector.md)
 
 - [Task 0022: Omarchy theme selector](docs/tasks/done/0022-omarchy-theme-selector.md)
+- [Task 0023: resumable Goose execution tracking](docs/tasks/done/0023-goose-execution-tracking.md) — documentation package only.
+
+- [Task 0022: Goose agent parity research](docs/tasks/done/0022-goose-agent-parity-research.md)
 
 - [Task 0021: public README setup and security](docs/tasks/done/0021-public-readme-setup-and-security.md)
 
@@ -229,8 +241,11 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 - [ADR-0002: Whiteboard editor and state](docs/decisions/0002-whiteboard-engine-and-state.md) — proposed.
 
 - [ADR-0001: filesystem work ledger and sortable filenames](docs/decisions/0001-filesystem-work-ledger.md)
+- [ADR-0002: Goose direction and authorization](docs/decisions/0002-goose-integration-direction.md) — Proposed; no implementation direction accepted.
 
 ## Handoff
+
+- [2026-11-13: Goose rebase onto updated main](docs/notes/2026-11-13-goose-main-rebase.md) — first replay conflict resolved; local Git continuation required.
 
 - [2026-11-12: Whiteboard images deployed](docs/notes/2026-11-12-whiteboard-images-deployed.md)
 
@@ -297,6 +312,9 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 - [2026-11-06: desktop header theme selector](docs/notes/2026-11-06-desktop-header-theme-selector.md)
 
 - [2026-11-06: Omarchy theme selector](docs/notes/2026-11-06-omarchy-theme-selector.md)
+- [2026-11-06: resumable Goose execution package](docs/notes/2026-11-06-goose-execution-package.md) — next: task 0024; transfer the documentation commit for another checkout.
+
+- [2026-11-06: Goose agent parity investigation](docs/notes/2026-11-06-goose-agent-parity-research.md)
 
 - [2026-11-06: README release setup and security](docs/notes/2026-11-06-readme-release-setup-and-security.md)
 
