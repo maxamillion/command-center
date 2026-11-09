@@ -813,19 +813,23 @@ def goose_tool_result(block):
 
 
 def goose_tool_request(block):
+    request=dict(title='Tool call',arguments='',arguments_truncated=False,error='')
     wrapper=block.get('toolCall')
     if isinstance(wrapper,dict) and wrapper.get('status')=='error':
         value=wrapper.get('error')
-        return 'Tool call','',(value[:12001] if isinstance(value,str) and value else '')
+        request['error']=value[:12001] if isinstance(value,str) and value else ''
+        return request
     value=wrapper.get('value') if isinstance(wrapper,dict) and wrapper.get('status')=='success' else wrapper
-    if not isinstance(value,dict): return 'Tool call','', ''
+    if not isinstance(value,dict): return request
     name=value.get('name')
-    title=name[:160] if isinstance(name,str) and name else 'Tool call'
+    if isinstance(name,str) and name: request['title']=name[:160]
     arguments=value.get('arguments')
-    if not isinstance(arguments,(dict,list,str)): return title,'',''
+    if not isinstance(arguments,(dict,list,str)): return request
     try: rendered=arguments if isinstance(arguments,str) else json.dumps(arguments,ensure_ascii=True,indent=2)
-    except (TypeError,ValueError,RecursionError): return title,'',''
-    return title,rendered[:4000],rendered[4000:]
+    except (TypeError,ValueError,RecursionError): return request
+    request['arguments']=rendered[:4000]
+    request['arguments_truncated']=len(rendered)>4000
+    return request
 
 
 def goose_activity_entries(rows,occurrences,conversation_id):
@@ -845,17 +849,17 @@ def goose_activity_entries(rows,occurrences,conversation_id):
                                         kind='thinking',title='Thinking',text=text[:12000],truncated=len(text)>12000,status='recorded'))
             elif category=='toolRequest' and row.get('role')=='assistant':
                 location=(row_id,index);pair=occurrences.get('calls',{}).get(location)
-                title,arguments,overflow=goose_tool_request(block)
+                request=goose_tool_request(block)
                 status='pending';output='';output_truncated=False
-                if overflow:
-                    status='error';output=overflow[:12000];output_truncated=len(overflow)>12000
+                if request['error']:
+                    status='error';output=request['error'][:12000];output_truncated=len(request['error'])>12000
                 elif pair in result_by_pair:
                     status,raw_output=goose_tool_result(result_by_pair[pair][0]);output=raw_output[:12000]
                     output_truncated=len(raw_output)>12000
                 entry=dict(id=f'goose-activity:{conversation_id}:{row_id}:{index}',order=index,
                            order_key=goose_order_key(int(row['created_timestamp']),row_id,index),timestamp=timestamp,
-                           kind='tool',title=title,arguments=arguments,status=status,
-                           truncated=len(arguments)>4000 or output_truncated)
+                           kind='tool',title=request['title'],arguments=request['arguments'],status=status,
+                           truncated=request['arguments_truncated'] or output_truncated)
                 if output: entry['output']=output
                 entries.append(entry)
     entries.sort(key=lambda entry:(entry['order_key'],entry['order']))
@@ -1026,6 +1030,14 @@ def goose_reply_observation(observation,chosen,known_version=None,known_order=No
     rows=[row for row in page['messages'] if row.get('role')=='assistant' and goose_row_visible(row)
           and goose_chat_text(row)[0].strip()]
     latest=rows[-1] if rows else None
+    # The latest page bounds source rows, including tool-only records. Absence
+    # from that page does not prove the previously observed reply was deleted.
+    previous=store.reply_row(chosen['session'],known_order) if known_order else None
+    previous_text=goose_chat_text(dict(content=previous['content']))[0] if previous and isinstance(previous.get('content'),list) else ''
+    if (previous_text.strip() and
+            (latest is None or goose_order_key(int(latest['created_timestamp']),int(latest['id']))<known_order)):
+        timestamp,row_id,_=known_order.split(':')
+        latest=dict(id=row_id,created_timestamp=timestamp,message_id=previous['message_id'],content=previous['content'])
     if latest:
         timestamp=int(latest['created_timestamp']);row_id=int(latest['id'])
         order=goose_order_key(timestamp,row_id)
@@ -1034,16 +1046,12 @@ def goose_reply_observation(observation,chosen,known_version=None,known_order=No
         result['reply_order_key']=order
         if isinstance(message_id,str) and message_id and len(message_id)<=256:
             result['cursor']=hashlib.sha256(f'goose-reply-v1:{store_id}:{chosen["session"]}:{message_id}'.encode()).hexdigest()
-    result['unchanged']=known_version==version
+    result['unchanged']=known_version==version and (not known_order or bool(previous_text.strip()))
     if not result['unchanged'] and known_order:
         if latest is None or result['reply_order_key'] is None or result['reply_order_key']<known_order:
             result['reset']=True
         elif result['reply_order_key']>known_order:
-            previous=store.reply_row(chosen['session'],known_order)
-            previous_text=goose_chat_text(dict(content=previous['content']))[0] if previous and isinstance(previous.get('content'),list) else ''
-            current_text=goose_chat_text(latest)[0]
-            if (previous is None or previous.get('message_id')==latest.get('message_id')
-                    or previous_text and previous_text==current_text):
+            if previous is None or previous.get('message_id')==latest.get('message_id'):
                 result['reset']=True
     return result
 

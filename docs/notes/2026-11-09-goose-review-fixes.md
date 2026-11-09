@@ -1,0 +1,3 @@
+# Goose review fixes
+
+Task 0051 fixes bugs 0017–0019: distinct identical replies remain unread, tool-only tails preserve existing reply identity, and long tool arguments retain real result status/output with truncation disclosure. Five added regression tests; 102 Python agent tests passed. Formatting, Clippy and focused Rust attention/capability tests passed. Full Rust library run: 45 passed, two sandbox listener permission failures. No live-agent actions or frontend changes. Changes are uncommitted. Task 0032 still awaits separate real-tmux browser evidence; SSH/native Goose/phone qualification remains unavailable.

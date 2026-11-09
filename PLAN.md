@@ -27,6 +27,7 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 
 
 
+
 - [Task 0009: Pi first-message receipts](docs/tasks/current/0009-pi-first-message-receipts.md) — CC dev; fix deployed, one legacy receipt archive choice pending.
 
 ## Active Goose work
@@ -128,6 +129,11 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 - [Task 0023: desktop header theme selector](docs/tasks/done/0023-desktop-header-theme-selector.md)
 
 - [Task 0022: Omarchy theme selector](docs/tasks/done/0022-omarchy-theme-selector.md)
+
+- [Task 0051: Goose review fixes](docs/tasks/done/0051-goose-review-fixes.md) — bugs 0017–0019 fixed with regression coverage.
+
+- [Task 0050: Goose branch review](docs/tasks/done/0050-goose-branch-code-review.md) — three reproduced defects; fixed by task 0051.
+
 - [Task 0023: resumable Goose execution tracking](docs/tasks/done/0023-goose-execution-tracking.md) — documentation package only.
 
 - [Task 0024: Goose implementation scope](docs/tasks/done/0024-goose-implementation-scope.md) — native observation-first scope accepted; external/live gates retained.
@@ -193,6 +199,8 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 
 
 
+
+
 - [Bug 0005: Pi first input unconfirmed](docs/bugs/open/0005-pi-first-input-unconfirmed.md)
 
 ## Fixed bugs
@@ -222,6 +230,10 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 - [Bug 0016: Codex internal records](docs/bugs/fixed/0016-codex-interruption-records-shown-as-human-chat.md)
 
 - [Bug 0015: desktop reload height](docs/bugs/fixed/0015-desktop-reload-button-too-tall.md)
+
+- [Bug 0019: A tool-only tail clears Goose reply attention](docs/bugs/fixed/0019-goose-tool-tail-clears-unread.md)
+- [Bug 0018: Long tool arguments replace successful Goose results with errors](docs/bugs/fixed/0018-goose-tool-argument-overflow.md)
+- [Bug 0017: Distinct identical Goose replies are silently marked read](docs/bugs/fixed/0017-goose-identical-reply-read-reset.md)
 
 - [Bug 0016: provider helper argument limit](docs/bugs/fixed/0016-provider-helper-argument-limit.md) — stream embedded Python helpers through stdin instead of exceeding OS argv limits.
 - [Bug 0015: Goose Windows store data directory](docs/bugs/fixed/0015-goose-windows-store-data-directory.md) — Windows default root now includes the Goose `data` directory.
@@ -264,13 +276,13 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 
 ## Handoff
 
-- [2026-11-13: Goose rebase onto updated main](docs/notes/2026-11-13-goose-main-rebase.md) — second replay source conflicts resolved and checked; local Git continuation required.
+- [2026-11-13: Goose rebase onto updated main](docs/notes/2026-11-13-goose-main-rebase.md) — third replay handoff conflict resolved; final commit remains to replay.
 
 - [2026-11-12: Whiteboard images deployed](docs/notes/2026-11-12-whiteboard-images-deployed.md)
 
 - [2026-11-12: Whiteboard image paste/drop ready](docs/notes/2026-11-12-whiteboard-images-ready.md)
 
-- [2026-11-11: Goose/main rebase](docs/notes/2026-11-11-goose-main-rebase.md) — second replay conflicts resolved in the working tree; continuation requires writable Git metadata.
+- [2026-11-11: Goose/main rebase](docs/notes/2026-11-11-goose-main-rebase.md) — third replay ledger conflicts resolved in the working tree; final commit still awaits replay.
 
 - [2026-11-10: exports ready and attachment design](docs/notes/2026-11-10-whiteboard-exports-ready.md)
 
@@ -333,6 +345,8 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 - [2026-11-06: desktop header theme selector](docs/notes/2026-11-06-desktop-header-theme-selector.md)
 
 - [2026-11-06: Omarchy theme selector](docs/notes/2026-11-06-omarchy-theme-selector.md)
+
+- [2026-11-09: Goose review fixes](docs/notes/2026-11-09-goose-review-fixes.md) — fixes and validation for bugs 0017–0019.
 
 - [2026-11-09: Goose Close agent](docs/notes/2026-11-09-goose-close-agent.md) — Close-agent capability and isolated Goose fixtures implemented; browser verification awaits a sandbox that permits local tmux sockets.
 

@@ -153,6 +153,90 @@ class GooseHistory(unittest.TestCase):
         self.assertTrue(reinserted['reset'])
         self.assertEqual(reinserted['cursor'],fresh['cursor'])
 
+    def test_distinct_identical_replies_are_new_replies(self):
+        fixtures.add_message(self.writer,'20261106_1','assistant','Done',100,message_id='first')
+        self.writer.commit()
+        first=agent.goose_reply_observation(self.observation,self.chosen)
+        fixtures.add_message(self.writer,'20261106_1','assistant','Done',101,message_id='second')
+        self.writer.commit()
+        second=agent.goose_reply_observation(self.observation,self.chosen,first['version'],first['reply_order_key'])
+        self.assertNotEqual(first['cursor'],second['cursor'])
+        self.assertFalse(second['reset'])
+
+    def test_tool_only_tail_preserves_reply_until_actual_deletion(self):
+        fixtures.add_message(self.writer,'20261106_1','assistant','Reply',100,message_id='reply')
+        self.writer.commit()
+        first=agent.goose_reply_observation(self.observation,self.chosen)
+        for index in range(101):
+            add_blocks(self.writer,'20261106_1','user',[
+                {'type':'toolResponse','id':str(index),'toolResult':{'status':'success','value':[]}}
+            ],101+index,message_id=f'tool-{index}')
+        self.writer.commit()
+        tail=agent.goose_reply_observation(self.observation,self.chosen,first['version'],first['reply_order_key'])
+        self.assertEqual(tail['cursor'],first['cursor'])
+        self.assertEqual(tail['reply_order_key'],first['reply_order_key'])
+        self.assertFalse(tail['reset'])
+        polled=agent.goose_reply_observation(self.observation,self.chosen,tail['version'],tail['reply_order_key'])
+        self.assertTrue(polled['unchanged'])
+        self.assertEqual(polled['cursor'],first['cursor'])
+        self.writer.execute("DELETE FROM messages WHERE message_id='reply'")
+        self.writer.commit()
+        deleted=agent.goose_reply_observation(self.observation,self.chosen,tail['version'],tail['reply_order_key'])
+        self.assertIsNone(deleted['cursor'])
+        self.assertTrue(deleted['reset'])
+
+    def test_new_reply_after_tool_only_tail_advances_normally(self):
+        fixtures.add_message(self.writer,'20261106_1','assistant','First',100,message_id='first')
+        self.writer.commit()
+        first=agent.goose_reply_observation(self.observation,self.chosen)
+        for index in range(101):
+            add_blocks(self.writer,'20261106_1','user',[
+                {'type':'toolResponse','id':str(index),'toolResult':{'status':'success','value':[]}}
+            ],101+index,message_id=f'tool-{index}')
+        self.writer.commit()
+        tail=agent.goose_reply_observation(self.observation,self.chosen,first['version'],first['reply_order_key'])
+        fixtures.add_message(self.writer,'20261106_1','assistant','Final',300,message_id='final')
+        self.writer.commit()
+        final=agent.goose_reply_observation(self.observation,self.chosen,tail['version'],tail['reply_order_key'])
+        self.assertNotEqual(final['cursor'],first['cursor'])
+        self.assertGreater(final['reply_order_key'],first['reply_order_key'])
+        self.assertFalse(final['reset'])
+
+    def test_long_tool_arguments_preserve_result_and_report_truncation(self):
+        add_blocks(self.writer,'20261106_1','assistant',[
+            {'type':'toolRequest','id':'long','toolCall':{'status':'success','value':{'name':'tool','arguments':'x'*4500}}}
+        ],100,message_id='request')
+        self.writer.commit()
+        pending=self.page()['activities'][0]
+        self.assertEqual(pending['status'],'pending')
+        self.assertTrue(pending['truncated'])
+        add_blocks(self.writer,'20261106_1','user',[
+            {'type':'toolResponse','id':'long','toolResult':{'status':'success','value':[{'type':'text','text':'Actual result'}]}}
+        ],101,message_id='result')
+        self.writer.commit()
+        completed=self.page()['activities'][0]
+        self.assertEqual(completed['status'],'completed')
+        self.assertEqual(completed['output'],'Actual result')
+        self.assertEqual(len(completed['arguments']),4000)
+        self.assertTrue(completed['truncated'])
+        self.writer.execute("UPDATE messages SET content_json=? WHERE message_id='result'",
+                            (json.dumps([{'type':'toolResponse','id':'long','toolResult':{'status':'error','error':'Actual failure'}}]),))
+        self.writer.commit()
+        failed=self.page()['activities'][0]
+        self.assertEqual(failed['status'],'error')
+        self.assertEqual(failed['output'],'Actual failure')
+        self.assertTrue(failed['truncated'])
+
+    def test_tool_request_errors_remain_errors(self):
+        add_blocks(self.writer,'20261106_1','assistant',[
+            {'type':'toolRequest','id':'bad','toolCall':{'status':'error','error':'Invalid call'}}
+        ],100,message_id='invalid')
+        self.writer.commit()
+        entry=self.page()['activities'][0]
+        self.assertEqual(entry['status'],'error')
+        self.assertEqual(entry['output'],'Invalid call')
+        self.assertFalse(entry['truncated'])
+
     def test_cursor_pages_are_opaque_source_bound_and_revalidate_loaded_pages(self):
         for index in range(230):
             fixtures.add_message(self.writer,'20261106_1','user',f'Row {index}',index+100,
