@@ -689,6 +689,10 @@ async fn bind_close_agent(
                         .into(),
                 ));
             }
+            crate::agents::require_capability(
+                status["provider"].as_str().unwrap_or(""),
+                "close_agent",
+            )?;
             use sha2::{Digest, Sha256};
             snapshot["expected"] = json!(format!(
                 "{:x}",

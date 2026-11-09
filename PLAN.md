@@ -5,7 +5,7 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 ## Direction and latest milestone
 
 - [Plan 0001: project overview](docs/plans/0001-project-overview.md)
-- [Plan 0002: Goose agent parity](docs/plans/0002-goose-agent-parity.md#execution-tracking-and-handoff) — resumable tracker prepared; implementation not started/authorized.
+- [Plan 0002: Goose agent parity](docs/plans/0002-goose-agent-parity.md#execution-tracking-and-handoff) — native observation-first implementation authorized; task 0032 is current.
 - [Milestone 0001: maintainable project records](docs/milestones/0001-maintainable-project-records.md) — complete.
 - [Milestone 0002: Goose observation](docs/milestones/0002-goose-native-observation.md) / [0003: full Goose parity](docs/milestones/0003-goose-full-agent-parity.md) — proposed; distinct acceptance gates.
 
@@ -29,10 +29,10 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 
 - [Task 0009: Pi first-message receipts](docs/tasks/current/0009-pi-first-message-receipts.md) — CC dev; fix deployed, one legacy receipt archive choice pending.
 
-## Planned and blocked Goose work
+## Active Goose work
 
-- [Task 0024: scope/authorization decision](docs/tasks/pending/0024-goose-implementation-scope.md) — next action; no implementation choice accepted.
-- [Execution tracker: tasks 0024–0049](docs/plans/0002-goose-agent-parity.md#execution-tracking-and-handoff) — 24 pending, 2 blocked; task directories/checklists are authoritative.
+- [Task 0032: Goose Close agent](docs/tasks/current/0032-goose-close-agent.md) — in progress under Plan 0002.
+- [Execution tracker: tasks 0027–0049](docs/plans/0002-goose-agent-parity.md#execution-tracking-and-handoff) — 15 pending, 2 blocked; task directories/checklists are authoritative.
 - [Task 0035: actual native evidence producer](docs/tasks/blocked/0035-goose-native-runtime-integration.md) and [Task 0046: native approval channel](docs/tasks/blocked/0046-goose-guarded-approvals.md) — external dependencies; no integration selected.
 
 ## Completed work
@@ -130,6 +130,22 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 - [Task 0022: Omarchy theme selector](docs/tasks/done/0022-omarchy-theme-selector.md)
 - [Task 0023: resumable Goose execution tracking](docs/tasks/done/0023-goose-execution-tracking.md) — documentation package only.
 
+- [Task 0024: Goose implementation scope](docs/tasks/done/0024-goose-implementation-scope.md) — native observation-first scope accepted; external/live gates retained.
+
+- [Task 0025: explicit provider dispatch](docs/tasks/done/0025-goose-provider-dispatch.md) — explicit fail-closed dispatch and exact process-name matching.
+
+- [Task 0026: independent capability guards](docs/tasks/done/0026-goose-capability-guards.md) — additive capability reasons and action-time Goose denial.
+
+- [Task 0027: history ordering and opaque cursors](docs/tasks/done/0027-goose-history-cursor-contract.md) — versioned paging, explicit order keys, reset semantics and exact reply read cursors.
+
+- [Task 0028: interactive Goose process discovery](docs/tasks/done/0028-goose-process-discovery.md) — exact interactive process identity and provider path roots.
+
+- [Task 0029: read-only Goose session store](docs/tasks/done/0029-goose-readonly-session-store.md) — schema-17 bounded SQLite reader with WAL and no-write guards.
+
+- [Task 0030: Goose history and activity projection](docs/tasks/done/0030-goose-history-activity-projection.md) — bounded, read-only chat/activity projection with opaque history paging, edit resets and no process-linkage or action grants.
+
+- [Task 0031: Goose observation UI](docs/tasks/done/0031-goose-observation-ui.md) — honest unverified history, capability limits, exact read state, card behavior and compact isolation.
+
 - [Task 0022: Goose agent parity research](docs/tasks/done/0022-goose-agent-parity-research.md)
 
 - [Task 0021: public README setup and security](docs/tasks/done/0021-public-readme-setup-and-security.md)
@@ -207,6 +223,9 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 
 - [Bug 0015: desktop reload height](docs/bugs/fixed/0015-desktop-reload-button-too-tall.md)
 
+- [Bug 0016: provider helper argument limit](docs/bugs/fixed/0016-provider-helper-argument-limit.md) — stream embedded Python helpers through stdin instead of exceeding OS argv limits.
+- [Bug 0015: Goose Windows store data directory](docs/bugs/fixed/0015-goose-windows-store-data-directory.md) — Windows default root now includes the Goose `data` directory.
+
 - [Bug 0013: setup requirements and navigation](docs/bugs/fixed/0013-readme-toolchain-and-navigation-requirements.md)
 
 - [Bug 0014: personal integration-source defaults](docs/bugs/fixed/0014-personal-machine-defaults-in-integration-settings.md)
@@ -241,15 +260,17 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 - [ADR-0002: Whiteboard editor and state](docs/decisions/0002-whiteboard-engine-and-state.md) — proposed.
 
 - [ADR-0001: filesystem work ledger and sortable filenames](docs/decisions/0001-filesystem-work-ledger.md)
-- [ADR-0002: Goose direction and authorization](docs/decisions/0002-goose-integration-direction.md) — Proposed; no implementation direction accepted.
+- [ADR-0002: Goose direction and authorization](docs/decisions/0002-goose-integration-direction.md) — accepted for scoped CC-owned implementation; external/live gates remain separate.
 
 ## Handoff
 
-- [2026-11-13: Goose rebase onto updated main](docs/notes/2026-11-13-goose-main-rebase.md) — first replay conflict resolved; local Git continuation required.
+- [2026-11-13: Goose rebase onto updated main](docs/notes/2026-11-13-goose-main-rebase.md) — second replay source conflicts resolved and checked; local Git continuation required.
 
 - [2026-11-12: Whiteboard images deployed](docs/notes/2026-11-12-whiteboard-images-deployed.md)
 
 - [2026-11-12: Whiteboard image paste/drop ready](docs/notes/2026-11-12-whiteboard-images-ready.md)
+
+- [2026-11-11: Goose/main rebase](docs/notes/2026-11-11-goose-main-rebase.md) — second replay conflicts resolved in the working tree; continuation requires writable Git metadata.
 
 - [2026-11-10: exports ready and attachment design](docs/notes/2026-11-10-whiteboard-exports-ready.md)
 
@@ -312,7 +333,16 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 - [2026-11-06: desktop header theme selector](docs/notes/2026-11-06-desktop-header-theme-selector.md)
 
 - [2026-11-06: Omarchy theme selector](docs/notes/2026-11-06-omarchy-theme-selector.md)
-- [2026-11-06: resumable Goose execution package](docs/notes/2026-11-06-goose-execution-package.md) — next: task 0024; transfer the documentation commit for another checkout.
+
+- [2026-11-09: Goose Close agent](docs/notes/2026-11-09-goose-close-agent.md) — Close-agent capability and isolated Goose fixtures implemented; browser verification awaits a sandbox that permits local tmux sockets.
+
+- [2026-11-08: Goose history projection](docs/notes/2026-11-08-goose-history-projection.md) — historical handoff from task 0030 to 0031.
+
+- [2026-11-06: Goose session store](docs/notes/2026-11-06-goose-session-store.md) — historical checkpoint; superseded by the history-projection handoff above.
+
+- [2026-11-06: Goose provider dispatch](docs/notes/2026-11-06-goose-provider-dispatch.md) — tasks 0024/0025 complete; task 0026 was next.
+
+- [2026-11-06: resumable Goose execution package](docs/notes/2026-11-06-goose-execution-package.md) — historical scope-gate preparation; superseded by the provider-dispatch handoff above.
 
 - [2026-11-06: Goose agent parity investigation](docs/notes/2026-11-06-goose-agent-parity-research.md)
 

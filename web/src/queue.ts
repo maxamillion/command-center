@@ -13,23 +13,29 @@ type ReadState = { key: string; instance: string; revision: number; finished: bo
 type AgentState = 'working' | 'ready' | 'approval' | 'unknown' | 'disconnected';
 type Activity = { state: AgentState; source: string; reason: string; evidence_at?: number; observed_at: number; transition?: string };
 export type AgentFileTarget={host:string;connection:string;path:string};
+type Capability = {available:boolean;reason?:string|null};
+type Capabilities = {process_observation?:Capability;project_history?:Capability;current_session_linkage?:Capability;verified_phase?:Capability;ordinary_message_submission?:Capability;acceptance_confirmation?:Capability;native_approval?:Capability;launch?:Capability;resume?:Capability;restart?:Capability;close_agent?:Capability};
 export type QueueTarget = { instance?:string|null;host: string; connection: string; session: string; window: string; pane: string };
-type Item = { background_tasks?:BackgroundSnapshot|null;card?:AgentCard;attention?: ReadState; id: string; session: string; session_name: string; window: string; window_name: string; pane: string; project: string; agent: string; prompt: string; context: string; status?: 'attention' | 'live' | 'disconnected'; activity?: Activity; last_seen?: number };
+type Item = { background_tasks?:BackgroundSnapshot|null;capabilities?:Capabilities;card?:AgentCard;attention?: ReadState; id: string; session: string; session_name: string; window: string; window_name: string; pane: string; project: string; agent: string; prompt: string; context: string; status?: 'attention' | 'live' | 'disconnected'; activity?: Activity; last_seen?: number };
 type Host = { id: string; name: string; connection_revision: string; error?: string; limited: boolean; items: Item[] };
 type Snapshot = { checked_at: number; hosts: Host[] };
-type Message = { id: string; role: 'user' | 'assistant'; text: string; timestamp: string; order?: number; truncated?: boolean };
+type Message = { id: string; role: 'user' | 'assistant'; text: string; timestamp: string; order?: number; order_key?: string; reply_order_key?: string; truncated?: boolean };
+type HistoryPage = { protocol: 'cc.history.v1'; store_id: string; session_id: string; revision: string; reset: boolean; next_cursor?: string | null };
 type Conversation = { id: string; session: string; timestamp: string; linked: boolean };
 type Approval = { id: string; title: string; context: string; choices: { id: string; label: string }[]; token?: string; submitted?: boolean };
 type InputRequest = InputQuestion;
 const inputSource=(source?:string)=>['pi_bridge','terminal_question','claude_input'].includes(source||'');
-type Detail = {input_request?:InputRequest|null; background_tasks?:BackgroundSnapshot|null;outbox_entries?:OutboxEntry[]; card?:AgentCard;approval?: Approval; read_state?: ReadState; activity?: Activity; instance?: string; context: string; project: string; provider: string; selected?: string; association: string; conversations: Conversation[]; messages: Message[]; activities?: AgentActivityEntry[]; activity_limited?: boolean; older_cursor?: number; send_available: boolean; send_reason?: string; message_token?: string; attention: boolean; history_version?: string; history_unchanged?: boolean; history_branch?: string; history_reset?: boolean; history_notice?: string };
+type Detail = {input_request?:InputRequest|null; background_tasks?:BackgroundSnapshot|null;capabilities?:Capabilities;outbox_entries?:OutboxEntry[]; card?:AgentCard;approval?: Approval; read_state?: ReadState; activity?: Activity; instance?: string; context: string; project: string; provider: string; selected?: string; association: string; conversations: Conversation[]; messages: Message[]; activities?: AgentActivityEntry[]; activity_limited?: boolean; older_cursor?: number; history_page?: HistoryPage; send_available: boolean; send_reason?: string; message_token?: string; attention: boolean; history_version?: string; history_unchanged?: boolean; history_branch?: string; history_reset?: boolean; history_notice?: string };
 const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = ''): HTMLElementTagNameMap[K] => { const n = document.createElement(tag); n.textContent = text; return n; };
+const historyKey = (entry: {order_key?: string; id?: string; position?: number}) => entry.order_key || entry.id || String(entry.position ?? '');
+const compareHistoryKeys = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 const stateOf = (item: Item): AgentState => item.activity?.state || (item.status === 'disconnected' ? 'disconnected' : item.status === 'attention' || (!item.status && item.prompt !== 'Live agent') ? 'approval' : 'unknown');
 const projectName = (path: string) => path.split('/').filter(Boolean).at(-1) || '/';
-const agentTitle = (item: Item) => item.card?.name || (compactClient() && ['claude','codex','pi','pi-coding-agent'].includes(item.window_name.toLowerCase()) ? projectName(item.project) : item.window_name);
+const agentTitle = (item: Item) => item.card?.name || (compactClient() && ['claude','codex','pi','pi-coding-agent','goose','goose-cli'].includes(item.window_name.toLowerCase()) ? projectName(item.project) : item.window_name);
 const waiting = (item: Item) => stateOf(item) === 'approval';
 const unread = (state?: ReadState) => !!state && (state.finished || state.new_approval || state.unread_reply);
 const needsAttention = (item: Item) => waiting(item) || unread(item.attention);
+const approvalAttentionLabel = (activity?: Activity) => inputSource(activity?.source) ? 'New input request' : activity?.source === 'terminal_prompt' ? 'Possible approval prompt' : 'New approval';
 const stateLabel = (state: AgentState, source?: string) => ({ working: 'Working', ready: 'Ready', approval: source === 'terminal_question' ? 'Input (detected)' : inputSource(source) ? 'Awaiting input' : source === 'terminal_prompt' ? 'Approval (detected)' : 'Awaiting approval', unknown: 'Unknown', disconnected: 'Disconnected' })[state];
 const rank: Record<AgentState, number> = { approval: 0, ready: 1, working: 2, unknown: 3, disconnected: 4 };
 function stateBadge(activity?: Activity, fallback: AgentState = 'unknown') {
@@ -151,9 +157,9 @@ export class AttentionQueue {
     this.hostSelect.setAttribute('aria-label', 'Queue machine'); this.projectSelect.setAttribute('aria-label', 'Queue project');
     this.statusSelect.setAttribute('aria-label', 'Agent status');
     this.options(this.statusSelect, 'All agents', [['needs_attention', 'Needs attention'], ['attention', 'Awaiting input / approval'], ['ready', 'Ready for a message'], ['working', 'Working'], ['unknown', 'Unknown'], ['disconnected', 'Disconnected']], '');
-    this.hostSelect.onchange = () => { this.openedForRead = ''; this.host = this.hostSelect.value; this.project = ''; this.render(); };
-    this.projectSelect.onchange = () => { this.openedForRead = ''; this.project = this.projectSelect.value; this.render(); };
-    this.statusSelect.onchange = () => { this.openedForRead = ''; this.render(); };
+    this.hostSelect.onchange = () => { this.host = this.hostSelect.value; this.project = ''; this.render(); };
+    this.projectSelect.onchange = () => { this.project = this.projectSelect.value; this.render(); };
+    this.statusSelect.onchange = () => { this.render(); };
     const refresh = node('button', 'Refresh queue'); refresh.onclick = () => { void this.refresh(); if (this.selected) void this.loadDetail(); };
     const done = node('button', 'Done'); done.className = 'queue-filters-done'; done.onclick = () => { this.filterPanel.open = false; };
     filters.append(this.statusSelect, this.hostSelect, this.projectSelect, refresh, done);
@@ -162,7 +168,7 @@ export class AttentionQueue {
     this.filterPanel.append(node('summary', 'Filters'), filters); heading.append(title, this.outbox.button(), startAgent, this.filterPanel);
     this.inboxControls.className = 'queue-inbox-controls';
     for (const [value, label] of [['', 'All agents'], ['needs_attention', 'Needs attention']]) {
-      const b = node('button', label); b.dataset.filter = value; b.onclick = () => { this.statusSelect.value = value; this.openedForRead = ''; this.render(); }; this.inboxControls.append(b);
+      const b = node('button', label); b.dataset.filter = value; b.onclick = () => { this.statusSelect.value = value; this.render(); }; this.inboxControls.append(b);
     }
     this.list.className = 'queue-list'; this.list.setAttribute('aria-label', 'Live agents');
     this.detail.className = 'queue-detail'; this.detail.setAttribute('aria-label', 'Request details');
@@ -190,7 +196,7 @@ export class AttentionQueue {
     this.history.onscroll = () => { void this.acknowledge(); };
     this.markRead.onclick = () => { void this.acknowledge(true); }; this.markRead.hidden = true;
     document.addEventListener('visibilitychange', () => { if (!document.hidden) void this.acknowledge(); });
-    this.older.onclick = () => { if (this.detailData?.older_cursor != null) void this.loadDetail(false, this.detailData.older_cursor); };
+    this.older.onclick = () => { const page=this.detailData?.history_page; if(page?.next_cursor) void this.loadDetail(false,undefined,page.next_cursor); else if(this.detailData?.older_cursor!=null) void this.loadDetail(false,this.detailData.older_cursor); };
     const screen = node('details'); screen.className = 'agent-screen'; screen.append(node('summary', 'Live terminal context'), this.context); this.context.tabIndex = 0;
     this.composer.setAttribute('aria-label', 'Message to agent'); this.composer.placeholder = 'Message this agent…'; this.composer.rows = 3; this.composer.maxLength = 12000;
     this.composer.oninput = () => { this.recall=undefined; this.drafts.set(this.draftKey(), this.composer.value); this.fitComposer(); this.updateSend(); };
@@ -259,11 +265,11 @@ export class AttentionQueue {
     this.selected = id; this.openedForRead = id; this.body.dataset.detail = 'true'; this.render();
   }
   private mergeCard(item:Item,instance:string,card:AgentCard){const key=`${item.id}/${instance}`,old=this.cardVersions.get(key);if(old&&old.revision>card.revision)item.card=old;else{item.card=card;this.cardVersions.set(key,card);}if(this.cardVersions.size>512)this.cardVersions.delete(this.cardVersions.keys().next().value!);}
-  private openAgentRestart(host:Host,item:Item){const instance=item.attention?.instance;if(!instance||stateOf(item)==='disconnected')return;void this.agentRestarter.open({host:host.id,connection_revision:host.connection_revision,session:item.session,window:item.window,pane:item.pane,instance,label:`${host.name} · ${agentTitle(item)}`});}
-  private openAgentClose(host:Host,item:Item){const instance=item.attention?.instance;if(!instance||stateOf(item)==='disconnected')return;void this.agentCloser.open({host:host.id,connection_revision:host.connection_revision,session:item.session,window:item.window,pane:item.pane,instance,label:`${host.name} · ${agentTitle(item)}`});}
+  private openAgentRestart(host:Host,item:Item){const instance=item.attention?.instance;if(!instance||stateOf(item)==='disconnected'||item.capabilities?.restart?.available===false)return;void this.agentRestarter.open({host:host.id,connection_revision:host.connection_revision,session:item.session,window:item.window,pane:item.pane,instance,label:`${host.name} · ${agentTitle(item)}`});}
+  private openAgentClose(host:Host,item:Item){const instance=item.attention?.instance;if(!instance||stateOf(item)==='disconnected'||item.capabilities?.close_agent?.available===false)return;void this.agentCloser.open({host:host.id,connection_revision:host.connection_revision,session:item.session,window:item.window,pane:item.pane,instance,label:`${host.name} · ${agentTitle(item)}`});}
   private openCardActions(host:Host,item:Item,x:number,y:number){
-    const action=(text:string,run:()=>void)=>{const button=node('button',text);button.type='button';button.setAttribute('role','menuitem');button.onclick=()=>{this.cardMenu.hidden=true;run();};button.disabled=!item.attention?.instance||stateOf(item)==='disconnected';return button;};
-    const edit=action('Edit card',()=>this.openCardEditor(host,item));const pin=action(item.card?.pinned?'Unpin card':'Pin card',()=>{void this.setCardPinned(host,item);});const close=action('Close agent…',()=>this.openAgentClose(host,item));close.className='danger';const restart=action('Restart agent…',()=>this.openAgentRestart(host,item));this.cardMenu.replaceChildren(edit,pin,restart,close);this.cardMenu.hidden=false;this.cardMenu.style.left=`${Math.max(8,Math.min(x,innerWidth-220))}px`;this.cardMenu.style.top=`${Math.max(8,Math.min(y,innerHeight-this.cardMenu.offsetHeight-8))}px`;edit.focus();
+    const action=(text:string,run:()=>void,capability?:'close_agent'|'restart')=>{const button=node('button',text);button.type='button';button.setAttribute('role','menuitem');button.onclick=()=>{this.cardMenu.hidden=true;run();};button.disabled=!item.attention?.instance||stateOf(item)==='disconnected'||!!capability&&item.capabilities?.[capability]?.available===false;if(capability)button.title=item.capabilities?.[capability]?.reason||'';return button;};
+    const edit=action('Edit card',()=>this.openCardEditor(host,item));const pin=action(item.card?.pinned?'Unpin card':'Pin card',()=>{void this.setCardPinned(host,item);});const close=action('Close agent…',()=>this.openAgentClose(host,item),'close_agent');close.className='danger';const restart=action('Restart agent…',()=>this.openAgentRestart(host,item),'restart');this.cardMenu.replaceChildren(edit,pin,restart,close);this.cardMenu.hidden=false;this.cardMenu.style.left=`${Math.max(8,Math.min(x,innerWidth-220))}px`;this.cardMenu.style.top=`${Math.max(8,Math.min(y,innerHeight-this.cardMenu.offsetHeight-8))}px`;edit.focus();
   }
   private async setCardPinned(host:Host,item:Item){const instance=item.attention?.instance;if(!instance)return;try{await this.cardEditor.setPinned({host:host.id,connection_revision:host.connection_revision,session:item.session,window:item.window,pane:item.pane,instance,label:agentTitle(item)},!item.card?.pinned);}catch(error){this.feedback.dataset.error='true';this.feedback.textContent=`${String(error)} Refresh this card before trying again.`;}}
   private openCardEditor(host:Host,item:Item){const instance=item.attention?.instance;if(!instance||stateOf(item)==='disconnected'){this.feedback.textContent='Refresh this agent before editing its card.';return;}void this.cardEditor.open({host:host.id,connection_revision:host.connection_revision,session:item.session,window:item.window,pane:item.pane,instance,label:agentTitle({...item,card:undefined})});}
@@ -328,7 +334,7 @@ export class AttentionQueue {
       const machine=node('small',`${h.name} / ${item.agent}`);machine.className='queue-card-machine';
       const name=node('strong',item.card?.name||(waiting(item)?item.prompt:agentTitle(item)));name.className='queue-card-name';name.title=name.textContent||'';
       const context=node('small');context.className='queue-card-context';context.title=`${h.name} · ${item.agent} · ${item.project} · ${item.session_name} / ${item.window_name} / ${item.pane}`;
-      const attention=[item.attention?.finished?'Finished':'',item.attention?.new_approval?(inputSource(item.activity?.source)?'New input request':'New approval'):'',item.attention?.unread_reply?'Unread reply':''].filter(Boolean);
+      const attention=[item.attention?.finished?'Finished':'',item.attention?.new_approval?approvalAttentionLabel(item.activity):'',item.attention?.unread_reply?'Unread reply':''].filter(Boolean);
       if(attention.length){const dot=node('span');dot.className='queue-card-unread';dot.setAttribute('role','img');dot.setAttribute('aria-label',attention.join(' · '));dot.title=attention.join(' · ');context.append(dot);}
       context.append(document.createTextNode(`${h.name} · ${item.agent} · ${projectName(item.project)}`));
       const background=backgroundLabel(item.background_tasks,stateOf(item)==='disconnected');if(background){for(const parent of [machine,context]){const badge=node('span',background);badge.className='queue-background-count';if(parent===context)parent.prepend(badge,document.createTextNode(' · '));else parent.append(badge);}}
@@ -338,7 +344,7 @@ export class AttentionQueue {
       if(item.card?.notes){const note=node('span',item.card.notes);note.className='agent-card-note-preview queue-card-note';note.title=item.card.notes;b.append(note);}if(item.card?.name&&waiting(item)){const prompt=node('span',item.prompt);prompt.className='agent-card-note-preview queue-card-prompt';prompt.title=item.prompt;b.append(prompt);}
       const flags = node('span'); flags.className = 'attention-flags';
       if (item.attention?.finished) flags.append(node('span', 'Finished'));
-      if (item.attention?.new_approval) flags.append(node('span', inputSource(item.activity?.source) ? 'New input request' : 'New approval'));
+      if (item.attention?.new_approval) flags.append(node('span', approvalAttentionLabel(item.activity)));
       if (item.attention?.unread_reply) flags.append(node('span', 'Unread reply'));
       b.append(flags);
       if(item.card?.pinned){const label=node('span','Pinned');label.className='queue-card-pin-label';b.append(label);}
@@ -358,12 +364,17 @@ export class AttentionQueue {
     this.root.querySelector('h1')!.textContent = compactClient() ? 'Agents' : 'AI Queue';
     for (const b of this.inboxControls.querySelectorAll('button')) b.setAttribute('aria-pressed', String(this.statusSelect.value === b.dataset.filter));
     const chosen = this.chosen();
-    this.restartAgent.disabled=this.closeAgent.disabled=this.editCard.disabled=!chosen?.item.attention?.instance||stateOf(chosen.item)==='disconnected';this.cardNotes.textContent=chosen?.item.card?.notes||'';this.cardNotes.hidden=!this.cardNotes.textContent;
+    const hasLiveIdentity=!!chosen?.item.attention?.instance&&stateOf(chosen.item)!=='disconnected';
+    this.editCard.disabled=!hasLiveIdentity;
+    this.restartAgent.disabled=!hasLiveIdentity||chosen?.item.capabilities?.restart?.available===false;
+    this.closeAgent.disabled=!hasLiveIdentity||chosen?.item.capabilities?.close_agent?.available===false;
+    this.restartAgent.title=chosen?.item.capabilities?.restart?.reason||'';this.closeAgent.title=chosen?.item.capabilities?.close_agent?.reason||'';
+    this.cardNotes.textContent=chosen?.item.card?.notes||'';this.cardNotes.hidden=!this.cardNotes.textContent;
     this.mute.hidden = !chosen?.item.attention;
     if (chosen?.item.attention) { this.mute.textContent = this.notifications.isMuted(JSON.stringify([chosen.item.attention.key, chosen.item.attention.instance])) ? 'Unmute notifications' : 'Mute notifications'; }
     this.subtitle.textContent = chosen ? `${chosen.h.name} · ${projectName(chosen.item.project)}${this.detailData?.association === 'project' && this.detailKey === this.selected ? ' · Project history' : ''}` : '';
     this.title.textContent = chosen ? (chosen.item.card?.name || (waiting(chosen.item) ? chosen.item.prompt : agentTitle(chosen.item))) : 'Nothing to review';
-    this.location.textContent = chosen ? `${chosen.h.name} · ${chosen.item.project}` : 'Codex, Claude and pi panes appear here while running, including when they are not waiting for input.';
+    this.location.textContent = chosen ? `${chosen.h.name} · ${chosen.item.project}` : 'Codex, Claude, pi and Goose panes appear here while running, including when they are not waiting for input.';
     const badge = stateBadge(this.currentActivity(), chosen ? stateOf(chosen.item) : 'unknown');
     this.activityBadge.replaceWith(badge); this.activityBadge = badge;
     if (chosen && stateOf(chosen.item) === 'disconnected') {
@@ -378,7 +389,9 @@ export class AttentionQueue {
       this.sendFeedback.textContent = ''; this.chatNotice.hidden = true; this.older.hidden = true; this.updateSend();
       if (chosen) void this.loadDetail(true);
     }
-    this.detail.querySelector<HTMLFormElement>('form')!.hidden = !chosen;
+    this.detail.dataset.provider = chosen?.item.agent || '';
+    this.detail.querySelectorAll<HTMLButtonElement>('.queue-outbox-button').forEach(button => { button.hidden = chosen?.item.agent === 'goose'; });
+    this.detail.querySelector<HTMLFormElement>('form')!.hidden = !chosen || chosen.item.agent === 'goose';
     this.detail.querySelector('summary')!.textContent = chosen && stateOf(chosen.item) === 'disconnected' ? 'Last observed terminal context' : 'Live terminal context';
     this.conversationSelect.hidden = !chosen;
     this.updateSend();
@@ -398,7 +411,7 @@ export class AttentionQueue {
   }
   private updateSend() {
     const data = this.detailData;
-    this.sendButton.disabled = this.submitting || !!data?.input_request || (this.chosen() ? stateOf(this.chosen()!.item) === 'disconnected' : true) || !data?.send_available || !data.message_token || !this.composer.value.trim() || new TextEncoder().encode(this.composer.value).length > 12000 || this.uncertain.has(this.draftKey());
+    this.sendButton.disabled = this.submitting || !!data?.input_request || (this.chosen() ? stateOf(this.chosen()!.item) === 'disconnected' : true) || !data?.send_available || data?.capabilities?.ordinary_message_submission?.available===false || data?.capabilities?.acceptance_confirmation?.available===false || !data.message_token || !this.composer.value.trim() || new TextEncoder().encode(this.composer.value).length > 12000 || this.uncertain.has(this.draftKey());
     this.sendButton.textContent=this.currentActivity()?.state==='working'?'Queue message':'Send message';
     this.composer.readOnly = this.submitting || !data?.instance || !!data?.approval || !!data?.input_request || !!data?.attention;
     this.renderApproval();
@@ -423,12 +436,13 @@ export class AttentionQueue {
   private renderActivity() {
     const selected=this.chosen();const detailed=this.detailKey===this.selected&&this.detailData?.instance===selected?.item.attention?.instance?this.detailData?.background_tasks:undefined;const queued=selected?.item.background_tasks;const background=detailed&&(!queued||detailed.observed_at>=queued.observed_at)?detailed:queued;this.backgroundTasks.update(background,this.detailUnavailable||this.currentActivity()?.state==='disconnected');
     const activity = this.currentActivity(), key = this.draftKey(), pending = this.pendingReplies.get(key);
+    const approval = this.detailData?.capabilities?.native_approval?.available === false ? undefined : this.detailData?.approval;
     if (pending && (Date.now() - pending.at > 15 * 60 * 1000 || this.latestReply() !== pending.reply ||
       (activity?.state === 'ready' && this.activitySignature(activity) !== pending.activity))) this.pendingReplies.delete(key);
     let text = '', busy = false;
     if (!this.chosen()) text = '';
     else if (this.detailUnavailable || activity?.state === 'disconnected') text = 'Live activity unavailable · reconnecting';
-    else if (this.detailData?.approval || activity?.state === 'approval') text = inputSource(activity?.source) ? (this.detailData?.input_request?.token ? 'Waiting for input · choose an answer below' : this.detailData?.input_request?.submitted ? 'Answer sent · waiting for agent activity' : 'Waiting for input · respond in terminal') : 'Waiting for your approval';
+    else if (approval || activity?.state === 'approval') text = inputSource(activity?.source) ? (this.detailData?.input_request?.token ? 'Waiting for input · choose an answer below' : this.detailData?.input_request?.submitted ? 'Answer sent · waiting for agent activity' : 'Waiting for input · respond in terminal') : activity?.source === 'terminal_prompt' ? 'Possible approval prompt · check the terminal' : 'Waiting for your approval';
     else if (this.submitting) { text = 'Submitting…'; busy = true; }
     else if (activity?.state === 'working') { text = 'Agent is working…'; busy = true; }
     else if (this.pendingReplies.has(key)) { text = pending && Date.now() - pending.at > 30000 ? 'Waiting for a reply · live status unavailable' : 'Message sent · waiting for agent activity…'; busy = true; }
@@ -441,7 +455,7 @@ export class AttentionQueue {
   }
   private approvalKey() { return `${this.draftKey()}/${this.detailData?.approval?.id || ''}`; }
   private renderApproval() {
-    const approval = this.detailData?.approval;
+    const approval = this.detailData?.capabilities?.native_approval?.available===false ? undefined : this.detailData?.approval;
     const question=this.detailData?.input_request || (this.detailData?.activity?.source==='claude_input'?{id:'native-waiting',title:'Claude is waiting for input',context:this.detailData.context.slice(-12000)}:undefined);
     this.approvalCard.hidden = !approval&&!question;
     this.approvalCard.setAttribute('aria-label',approval?'Tool approval':'Input request');
@@ -450,7 +464,7 @@ export class AttentionQueue {
       if(chosen)this.questionControls.render(this.approvalCard,{host:chosen.h.id,session:chosen.item.session,window:chosen.item.window,pane:chosen.item.pane,instance:this.detailData?.instance||'',conversation:this.detailData?.selected||''},question,this.submitting||stateOf(chosen.item)==='disconnected');
       this.detail.querySelector<HTMLFormElement>('form')!.hidden=true;return;
     }
-    this.detail.querySelector<HTMLFormElement>('form')!.hidden = !!approval || !this.chosen();
+    this.detail.querySelector<HTMLFormElement>('form')!.hidden = !!approval || !this.chosen() || this.detailData?.provider === 'goose' || this.chosen()?.item.agent === 'goose';
     if (!approval) { this.approvalCard.replaceChildren(); return; }
     if (document.activeElement === this.composer) this.composer.blur();
     const key = this.approvalKey(), review = node('details');
@@ -488,7 +502,7 @@ export class AttentionQueue {
       void this.refresh();
     }
   }
-  private async loadDetail(reset = false, before?: number) {
+  private async loadDetail(reset = false, before?: number, historyCursor?: string) {
     const chosen = this.chosen(); if (!chosen || this.submitting || (this.loadingDetail && !reset)) return;
     if (stateOf(chosen.item) === 'disconnected') {
       this.detailFeedback.textContent = chosen.item.activity?.reason || 'Agent disconnected';
@@ -501,7 +515,8 @@ export class AttentionQueue {
     const query = new URLSearchParams({ session: item.session, window: item.window, pane: item.pane, connection_revision: h.connection_revision });
     const conversation = this.conversations.get(key); if (conversation) query.set('conversation', conversation);
     if (this.detailData?.history_branch) query.set('known_branch', this.detailData.history_branch);
-    if (before != null) query.set('before', String(before));
+    if (historyCursor) query.set('history_cursor', historyCursor);
+    else if (before != null) query.set('before', String(before));
     else if (!reset && this.detailData?.history_version) query.set('known_version', this.detailData.history_version);
     if (reset) this.detailFeedback.textContent = 'Loading conversation…';
     try {
@@ -509,54 +524,73 @@ export class AttentionQueue {
       const data: Detail & {error?: string} = await response.json();
       if (!response.ok) throw new Error(data.error || 'Conversation unavailable');
       if (request !== this.detailRequest || key !== this.selected) return;
+      if(data.history_page?.reset)data.history_reset=true;
       const previous = this.detailData;
       if (data.history_unchanged && previous) {
-        data.messages = previous.messages; data.activities = previous.activities; data.activity_limited = previous.activity_limited; data.older_cursor = previous.older_cursor; data.history_branch = previous.history_branch; data.history_notice = previous.history_notice;
-      } else if (!data.history_reset && before != null && previous && previous.selected === data.selected && previous?.instance === data.instance) {
+        data.messages = previous.messages; data.activities = previous.activities; data.activity_limited = previous.activity_limited; data.older_cursor = previous.older_cursor; data.history_page = previous.history_page; data.history_branch = previous.history_branch; data.history_notice = previous.history_notice;
+      } else if (!data.history_reset && (before != null || historyCursor != null) && previous && previous.selected === data.selected && previous?.instance === data.instance && (!previous.history_page || !data.history_page || previous.history_page.revision === data.history_page.revision)) {
         const known = new Set(previous.messages.map(m => m.id));
         data.messages = [...data.messages.filter(m => !known.has(m.id)), ...previous.messages];
-        const activityIds = new Set((previous.activities || []).map(a => a.id));
-        data.activities = [...(data.activities || []).filter(a => !activityIds.has(a.id)), ...(previous.activities || [])];
+        const activities = new Map((previous.activities || []).map(a => [a.id, a]));
+        for (const activity of data.activities || []) activities.set(activity.id, activity);
+        data.activities = [...activities.values()];
         data.message_token = previous.message_token; data.read_state = previous.read_state;
-      } else if (!data.history_reset && !reset && previous && previous.selected === data.selected && previous?.instance === data.instance && (previous.messages.length || previous.activities?.length)) {
+      } else if (!data.history_reset && !reset && before == null && historyCursor == null && previous && previous.selected === data.selected && previous?.instance === data.instance && (previous.messages.length || previous.activities?.length)) {
         const known = new Set(data.messages.map(m => m.id));
-        const first = Number(data.messages[0]?.id || 0);
-        data.messages = [...previous.messages.filter(m => !known.has(m.id) && Number(m.id) < first), ...data.messages];
+        const first = data.messages[0] ? historyKey(data.messages[0]) : '';
+        data.messages = [...previous.messages.filter(m => !known.has(m.id) && (!first || compareHistoryKeys(historyKey(m), first) < 0)), ...data.messages];
         const activityIds = new Set((data.activities || []).map(a => a.id));
-        const activityFirst = Math.min(first || Infinity, data.activities?.[0]?.position ?? Infinity);
-        data.activities = [...(previous.activities || []).filter(a => !activityIds.has(a.id) && a.position < activityFirst), ...(data.activities || [])];
+        const activityFirst = (data.activities || []).map(historyKey).sort(compareHistoryKeys)[0] || first;
+        data.activities = [...(previous.activities || []).filter(a => !activityIds.has(a.id) && (!activityFirst || compareHistoryKeys(historyKey(a), activityFirst) < 0)), ...(data.activities || [])];
         data.older_cursor = previous.older_cursor;
+        if(data.history_page?.revision===previous.history_page?.revision)data.history_page=previous.history_page;
       }
       if(data.card&&data.instance&&data.instance===item.attention?.instance){this.mergeCard(item,data.instance,data.card);this.title.textContent=item.card?.name||(waiting(item)?item.prompt:agentTitle(item));this.cardNotes.textContent=item.card?.notes||'';this.cardNotes.hidden=!this.cardNotes.textContent;const label=this.list.querySelector('.queue-card.selected strong');if(label)label.textContent=this.title.textContent;}
       if(previous?.selected!==data.selected||previous?.instance!==data.instance||previous?.history_branch!==data.history_branch||data.history_reset)this.clearRecall();
-      this.detailUnavailable = false; this.detailData = data; this.readAvailable = before == null;
+      this.detailUnavailable = false; this.detailData = data; this.readAvailable = before == null && historyCursor == null;
       this.composer.value = this.drafts.get(this.draftKey()) || ''; this.fitComposer();
       this.context.textContent = data.context;
-      const sendReason = data.provider !== 'pi' && !data.approval && compactClient() && data.send_reason ? (data.attention ? 'Awaiting approval. Respond from a desktop terminal.' : 'Messaging is unavailable here. Use a desktop terminal.') : data.send_reason;
+      const capabilityReason = data.send_reason || data.capabilities?.ordinary_message_submission?.reason || '';
+      const sendReason = data.activity?.source === 'terminal_prompt'
+        ? `Possible approval prompt detected. Check it in the terminal. ${capabilityReason}`.trim()
+        : data.provider === 'goose' ? capabilityReason
+          : data.provider !== 'pi' && compactClient() && capabilityReason
+            ? (data.attention ? 'Awaiting approval. Respond from a desktop terminal.' : 'Messaging is unavailable here. Use a desktop terminal.')
+            : capabilityReason;
       this.detailFeedback.textContent = sendReason || (previous?.instance && previous.instance !== data.instance ? 'Agent process changed. Drafts for the previous process have been kept separately.' : data.activity?.reason || 'Provider status unknown.');
-      this.chatNotice.hidden = !!data.approval || !data.send_reason; this.chatNotice.textContent = sendReason || '';
+      this.chatNotice.hidden = !!data.approval || !sendReason; this.chatNotice.textContent = sendReason || '';
       this.subtitle.textContent = `${h.name} · ${projectName(item.project)}${data.association === 'project' ? ' · Project history' : ''}`;
       const badge = stateBadge(this.currentActivity()); this.activityBadge.replaceWith(badge); this.activityBadge = badge;
-      this.options(this.conversationSelect, 'Choose a project conversation', data.conversations.map(c => [c.id, `${c.timestamp || 'Conversation'} · ${(c.session || c.id).slice(0, 8)}${c.linked ? ' · process linked' : ''}`]), data.selected || '');
-      this.association.textContent = data.association === 'process' ? 'Conversation linked to this running process.' : data.association === 'project' ? 'Project conversation. This log is not verified as belonging to the running pane.' : 'Choose a conversation from this project. If the CLI exposes a process-linked log, it is selected automatically.';
-      this.older.hidden = data.older_cursor == null;
+      this.options(this.conversationSelect, data.provider === 'goose' ? 'Choose unverified project history' : 'Choose a project conversation', data.conversations.map(c => [c.id, data.provider === 'goose' ? `Unverified project history · ${c.timestamp || 'Conversation'} · ${(c.session || c.id).slice(0, 8)}` : `${c.timestamp || 'Conversation'} · ${(c.session || c.id).slice(0, 8)}${c.linked ? ' · process linked' : ''}`]), data.selected || '');
+      if (data.provider === 'goose') {
+        const linkage = data.capabilities?.current_session_linkage?.reason || 'Goose session linkage is not verified.';
+        const phase = data.capabilities?.verified_phase?.reason || 'Live Goose status is unverified.';
+        this.association.textContent = data.selected
+          ? `Project history only. Command Center cannot verify that this conversation belongs to the running Goose process. ${linkage} ${phase}`
+          : data.conversations.length
+            ? `Choose a conversation from this project. It will remain unverified project history. ${linkage} ${phase}`
+            : `No Goose conversation history is available for this project. ${linkage} ${phase}`;
+      } else {
+        this.association.textContent = data.association === 'process' ? 'Conversation linked to this running process.' : data.association === 'project' ? 'Project conversation. This log is not verified as belonging to the running pane.' : 'Choose a conversation from this project. If the CLI exposes a process-linked log, it is selected automatically.';
+      }
+      this.older.hidden = data.older_cursor == null && !data.history_page?.next_cursor;
       const top = this.history.scrollTop, height = this.history.scrollHeight;
       const nearBottom = height - top - this.history.clientHeight < 60;
       if (!data.history_unchanged) {
-        const sameConversation = previous?.selected === data.selected && previous?.instance === data.instance && this.detailKey === key && !data.history_reset;
+        const sameConversation = previous?.selected === data.selected && previous?.instance === data.instance && this.detailKey === key;
         const expanded = new Set(sameConversation ? [...this.history.querySelectorAll<HTMLDetailsElement>('.agent-activity[open]')].map(n => n.dataset.activityId) : []);
         const focused = document.activeElement instanceof HTMLElement && this.history.contains(document.activeElement)
           ? document.activeElement.closest<HTMLDetailsElement>('.agent-activity')?.dataset.activityId : undefined;
-        const entries: {position: number; order: number; element: HTMLElement}[] = data.messages.map(message => {
+        const entries: {order_key: string; order: number; element: HTMLElement}[] = data.messages.map(message => {
           const article = node('article'); article.className = `agent-message ${message.role}`; article.dataset.messageId=message.id;
           const body=message.role === 'assistant' ? chatMarkdown(message.text,{project:data.project||item.project,machine:h.name,openFile:path=>this.openFile({host:h.id,connection:h.connection_revision,path})}) : node('div', message.text);
           if(message.role==='user')body.classList.add('agent-user-text');
           article.append(node('small', `${message.role === 'user' ? 'You' : 'Agent'}${message.timestamp ? ` · ${new Date(message.timestamp).toLocaleString()}` : ''}`), body);
           if (message.truncated) article.append(node('small', 'Message shortened for this view. Open the CLI for the full text.'));
-          return {position: Number(message.id), order: message.order ?? -1, element: article};
+          return {order_key:historyKey(message), order: message.order ?? -1, element: article};
         });
-        for (const activity of data.activities || []) entries.push({position: activity.position, order: activity.order, element: activityElement(activity, expanded.has(activity.id))});
-        entries.sort((a,b) => a.position - b.position || a.order - b.order);
+        for (const activity of data.activities || []) entries.push({order_key:historyKey(activity), order: activity.order, element: activityElement(activity, expanded.has(activity.id))});
+        entries.sort((a,b) => compareHistoryKeys(a.order_key,b.order_key) || a.order - b.order);
         this.history.replaceChildren(...entries.map(e => e.element));
         if (sameConversation && focused) {
           const detail = [...this.history.querySelectorAll<HTMLDetailsElement>('.agent-activity')].find(n => n.dataset.activityId === focused);
@@ -571,7 +605,7 @@ export class AttentionQueue {
       if (!data.history_unchanged) { if (data.history_notice) this.history.prepend(node('p', data.history_notice)); this.history.prepend(this.older); }
       if(data.outbox_entries)this.outbox.ingest(data.outbox_entries);
       this.renderOutbox();
-      if (before != null) this.history.scrollTop = top + this.history.scrollHeight - height;
+      if (before != null || historyCursor != null) this.history.scrollTop = top + this.history.scrollHeight - height;
       else if (reset || nearBottom) {
         this.history.scrollTop = this.history.scrollHeight;
         requestAnimationFrame(() => { if (request === this.detailRequest && key === this.selected) { this.history.scrollTop = this.history.scrollHeight; void this.acknowledge(); } });
@@ -692,7 +726,7 @@ export class AttentionQueue {
         if (state.new_approval) tokens.push(JSON.stringify([scope, 'approval', state.revision]));
         if (state.finished) tokens.push(JSON.stringify([scope, 'finished', state.revision]));
         if (state.unread_reply && state.reply_cursor) tokens.push(JSON.stringify([scope, 'reply', state.conversation, state.reply_cursor]));
-        return { scope, tokens, title: `${h.name} · ${item.card?.name||item.window_name}`, body: state.new_approval ? (inputSource(item.activity?.source) ? 'Agent needs input' : 'Agent needs approval') : state.finished ? 'Agent finished working' : 'New agent reply', reading: this.visible && document.hasFocus() && this.openedForRead === item.id && this.selected === item.id && this.history.scrollHeight - this.history.scrollTop - this.history.clientHeight < 60,
+        return { scope, tokens, title: `${h.name} · ${item.card?.name||item.window_name}`, body: state.new_approval ? (inputSource(item.activity?.source) ? 'Agent needs input' : item.activity?.source === 'terminal_prompt' ? 'Possible approval prompt' : 'Agent needs approval') : state.finished ? 'Agent finished working' : 'New agent reply', reading: this.visible && document.hasFocus() && this.openedForRead === item.id && this.selected === item.id && this.history.scrollHeight - this.history.scrollTop - this.history.clientHeight < 60,
           open: () => { void this.openNotification(h, item); } };
       })));
       this.render();

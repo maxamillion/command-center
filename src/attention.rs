@@ -67,6 +67,12 @@ struct Conversation {
     mtime_ns: u64,
     #[serde(default)]
     position: u64,
+    #[serde(default)]
+    source_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    reply_order_key: Option<String>,
 }
 #[derive(Clone, Deserialize)]
 pub(crate) struct Reply {
@@ -79,6 +85,14 @@ pub(crate) struct Reply {
     mtime_ns: u64,
     #[serde(default)]
     position: u64,
+    #[serde(default)]
+    source_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    reply_order_key: Option<String>,
+    #[serde(default)]
+    reset: bool,
 }
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct View {
@@ -151,14 +165,21 @@ impl Attention {
             )
         })
     }
-    pub async fn observation_args(&self, key: &str) -> (Option<String>, Option<String>) {
-        self.data
-            .lock()
-            .await
-            .agents
-            .get(key)
-            .map(|a| (a.watch.clone(), a.version.clone()))
-            .unwrap_or_default()
+    pub async fn observation_args(
+        &self,
+        key: &str,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let data = self.data.lock().await;
+        let Some(agent) = data.agents.get(key) else {
+            return (None, None, None);
+        };
+        let order = agent
+            .conversation
+            .as_ref()
+            .and_then(|conversation| data.conversations.get(conversation))
+            .filter(|conversation| agent.watch.as_deref() == conversation.history_id.as_deref())
+            .and_then(|conversation| conversation.reply_order_key.clone());
+        (agent.watch.clone(), agent.version.clone(), order)
     }
     pub async fn observe(
         &self,
@@ -217,6 +238,25 @@ impl Attention {
         let mut selected = None;
         let mut displayed_cursor = None;
         if let Some(reply) = reply {
+            if reply.conversation.len() > 1024
+                || reply
+                    .source_id
+                    .as_ref()
+                    .is_some_and(|value| value.is_empty() || value.len() > 256)
+                || reply
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|value| value.is_empty() || value.len() > 512)
+                || reply
+                    .reply_order_key
+                    .as_ref()
+                    .is_some_and(|value| value.is_empty() || value.len() > 512)
+            {
+                return Err(ApiError(
+                    StatusCode::BAD_GATEWAY,
+                    "Invalid agent history cursor metadata".into(),
+                ));
+            }
             let conversation_key = hash(format!("{endpoint}/{}", reply.conversation));
             if !data.conversations.contains_key(&conversation_key)
                 && data.conversations.len() >= 4096
@@ -232,6 +272,16 @@ impl Attention {
                 .entry(conversation_key.clone())
                 .or_default();
             conversation.history_id = Some(reply.conversation.clone());
+            let source_changed = conversation
+                .source_id
+                .as_ref()
+                .zip(reply.source_id.as_ref())
+                .is_some_and(|(old, new)| old != new);
+            let session_changed = conversation
+                .session_id
+                .as_ref()
+                .zip(reply.session_id.as_ref())
+                .is_some_and(|(old, new)| old != new);
             displayed_cursor = Some(if reply.unchanged {
                 if conversation.version == reply.version {
                     conversation.latest.clone()
@@ -241,19 +291,60 @@ impl Attention {
             } else {
                 reply.cursor.clone()
             });
-            if !reply.unchanged
-                && (first
-                    || (reply.mtime_ns, reply.position)
-                        >= (conversation.mtime_ns, conversation.position))
-            {
-                if let Some(cursor) = reply.cursor {
-                    conversation.latest = Some(cursor);
+            if !reply.unchanged {
+                let same_order_changed = reply
+                    .reply_order_key
+                    .as_ref()
+                    .zip(conversation.reply_order_key.as_ref())
+                    .is_some_and(|(incoming, current)| {
+                        incoming == current && reply.cursor != conversation.latest
+                    });
+                let reset = reply.reset || source_changed || session_changed || same_order_changed;
+                let current_order = conversation
+                    .reply_order_key
+                    .clone()
+                    .or_else(|| Some(format!("{:020}:000000", conversation.position)));
+                let order_is_older = reply
+                    .reply_order_key
+                    .as_ref()
+                    .zip(current_order.as_ref())
+                    .is_some_and(|(incoming, current)| incoming < current && !reset);
+                if (first || !order_is_older)
+                    && (first
+                        || reset
+                        || reply
+                            .reply_order_key
+                            .as_ref()
+                            .zip(current_order.as_ref())
+                            .is_some_and(|(incoming, current)| incoming > current)
+                        || reply
+                            .reply_order_key
+                            .as_ref()
+                            .zip(current_order.as_ref())
+                            .is_some_and(|(incoming, current)| incoming == current)
+                            && reply.cursor == conversation.latest
+                        || reply.reply_order_key.is_none()
+                            && (reply.mtime_ns, reply.position)
+                                >= (conversation.mtime_ns, conversation.position))
+                {
+                    if reply.cursor.is_some() || reset {
+                        conversation.latest = reply.cursor.clone();
+                    }
                     conversation.position = reply.position;
-                }
-                conversation.mtime_ns = reply.mtime_ns;
-                conversation.version = reply.version.clone();
-                if first {
-                    conversation.read = conversation.latest.clone();
+                    conversation.mtime_ns = reply.mtime_ns;
+                    conversation.version = reply.version.clone();
+                    if reset || first {
+                        conversation.read = conversation.latest.clone();
+                    }
+                    if reset || reply.reply_order_key.is_some() {
+                        conversation.reply_order_key = reply.reply_order_key.clone();
+                    }
+                    if reply.source_id.is_some() {
+                        conversation.source_id = reply.source_id.clone();
+                    }
+                    if reply.session_id.is_some() {
+                        conversation.session_id = reply.session_id.clone();
+                    }
                 }
             }
             if !agent.conversations.contains(&conversation_key) {
@@ -421,6 +512,24 @@ mod tests {
                 _ => 3,
             },
             position: 0,
+            source_id: None,
+            session_id: None,
+            reply_order_key: None,
+            reset: false,
+        })
+    }
+    fn opaque_reply(cursor: &str, order: &str, reset: bool) -> Option<Reply> {
+        Some(Reply {
+            conversation: "thread".into(),
+            version: format!("revision-{cursor}"),
+            cursor: Some(cursor.into()),
+            unchanged: false,
+            mtime_ns: 0,
+            position: 0,
+            source_id: Some("store-opaque".into()),
+            session_id: Some("native-session".into()),
+            reply_order_key: Some(order.into()),
+            reset,
         })
     }
     fn read(view: &View) -> Read {
@@ -516,6 +625,94 @@ mod tests {
         assert!(approval.new_approval);
         let seen = store.read(read(&approval)).await.unwrap();
         assert!(!seen.new_approval && seen.needs_attention);
+    }
+
+    #[tokio::test]
+    async fn opaque_reply_order_resets_reinsertions_and_rejects_stale_acknowledgements() {
+        let store = Attention::new(None).unwrap();
+        let order_one = "00000000000000000001:000000";
+        let order_two = "00000000000000000002:000000";
+        let order_three = "00000000000000000003:000000";
+        let baseline = store
+            .observe(
+                ("agent", "host"),
+                Some("process"),
+                &activity("unknown", "none"),
+                opaque_reply("original", order_two, false),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!baseline.unread());
+        let reset = store
+            .observe(
+                ("agent", "host"),
+                Some("process"),
+                &activity("unknown", "none"),
+                opaque_reply("reinserted-old-row", order_one, true),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!reset.unread());
+        let new_reply = store
+            .observe(
+                ("agent", "host"),
+                Some("process"),
+                &activity("unknown", "none"),
+                opaque_reply("new-reply", order_three, false),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(new_reply.unread_reply);
+        let stale = store
+            .observe(
+                ("agent", "host"),
+                Some("process"),
+                &activity("unknown", "none"),
+                opaque_reply("stale", order_two, false),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(stale.unread_reply);
+        store.read(read(&baseline)).await.unwrap();
+        assert!(store.view("agent").await.unread_reply);
+    }
+
+    #[tokio::test]
+    async fn a_revision_refresh_with_the_same_reply_cursor_is_not_unread() {
+        let store = Attention::new(None).unwrap();
+        let order = "00000000000000000001:000000";
+        let baseline = store
+            .observe(
+                ("agent", "host"),
+                Some("process"),
+                &activity("unknown", "none"),
+                opaque_reply("same-reply", order, false),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        let refreshed = store
+            .observe(
+                ("agent", "host"),
+                Some("process"),
+                &activity("unknown", "none"),
+                opaque_reply("same-reply", order, false),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!baseline.unread());
+        assert!(!refreshed.unread());
     }
     #[tokio::test]
     async fn metadata_survives_restart_and_isolated_processes_cannot_share_read_markers() {

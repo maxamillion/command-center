@@ -4,7 +4,7 @@ Owner: unclaimed
 Claimed: not claimed
 State: pending (directory is authoritative)
 Phase: E2
-Depends on: [0034](../pending/0034-goose-runtime-proof-fixtures.md), [0027](../pending/0027-goose-history-cursor-contract.md)
+Depends on: [0034](../pending/0034-goose-runtime-proof-fixtures.md), [0027](../done/0027-goose-history-cursor-contract.md)
 Authorization / external gate: Not authorized for implementation by this tracking package. Task 0024 must record the applicable scope approval; later native/approval work also needs its specific accepted contract and integration consent. Completed prerequisites alone do not grant permission.
 
 ## Goal

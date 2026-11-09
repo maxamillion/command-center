@@ -2,17 +2,45 @@
 No installation, daemon, contents in logs, or arbitrary log path from clients.
 """
 import hashlib
+import base64
 import shutil
 import json
 import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import subprocess
 import sys
 import uuid
 import time
 from datetime import datetime
+from datetime import timezone
+
+# Adding a provider requires an explicit audit of each provider-specific path;
+# unsupported values must not inherit the Claude fallbacks below.
+PROVIDER_NAMES = {
+    'codex': frozenset(('codex',)),
+    'claude': frozenset(('claude',)),
+    'pi': frozenset(('pi', 'pi-coding-agent')),
+    'goose': frozenset(('goose', 'goose-cli')),
+}
+AGENT_PROVIDERS = frozenset(PROVIDER_NAMES)
+CAPABILITY_NAMES = (
+    'process_observation', 'project_history', 'current_session_linkage',
+    'verified_phase', 'ordinary_message_submission', 'acceptance_confirmation',
+    'native_approval', 'launch', 'resume', 'restart', 'close_agent',
+)
+_ESTABLISHED_CAPABILITIES = frozenset(CAPABILITY_NAMES) - frozenset(('native_approval',))
+_GOOSE_CAPABILITIES = frozenset(('process_observation','project_history','close_agent'))
+PROVIDER_CAPABILITIES = {
+    'codex': frozenset(CAPABILITY_NAMES),
+    'claude': frozenset(CAPABILITY_NAMES),
+    'pi': _ESTABLISHED_CAPABILITIES,
+    # Goose project history is a persisted read-only projection. The other
+    # capabilities remain disabled until separate native contracts prove them.
+    'goose': _GOOSE_CAPABILITIES,
+}
 
 class Failure(Exception):
     def __init__(self, status, message):
@@ -20,6 +48,51 @@ class Failure(Exception):
 
 def fail(status, message):
     raise Failure(status, message)
+
+def require_provider(value):
+    if not isinstance(value, str) or value not in AGENT_PROVIDERS:
+        fail(400, 'Unsupported agent provider')
+    return value
+
+def provider_from_names(names):
+    for kind, aliases in PROVIDER_NAMES.items():
+        if any(name in aliases for name in names):
+            return kind
+    return None
+
+def capability_reason(provider, capability):
+    return {
+        ('pi', 'native_approval'): 'Pi dialogs must be handled in the terminal.',
+        ('goose', 'process_observation'): 'Goose process observation is available; session linkage and lifecycle evidence are not.',
+        ('goose', 'project_history'): 'Goose project history is read-only, unlinked history from the configured project.',
+        ('goose', 'current_session_linkage'): 'The native Goose CLI does not expose verified current-session identity.',
+        ('goose', 'verified_phase'): 'No authoritative native Goose lifecycle evidence is available.',
+        ('goose', 'ordinary_message_submission'): 'Guarded Goose message submission is not available. Respond in the terminal.',
+        ('goose', 'acceptance_confirmation'): 'Native Goose input acceptance cannot be verified.',
+        ('goose', 'native_approval'): 'Goose approvals must be handled in the terminal.',
+        ('goose', 'launch'): 'Goose launch support is not implemented yet.',
+        ('goose', 'resume'): 'Exact Goose conversation ownership is not available.',
+        ('goose', 'restart'): 'Exact Goose conversation ownership is not available.',
+        ('goose', 'close_agent'): 'Goose Close agent is available after an exact process and topology review.',
+    }.get((provider, capability), 'This provider capability is unavailable.')
+
+def capability_available(provider, capability):
+    return capability in PROVIDER_CAPABILITIES.get(provider, ())
+
+def require_capability(provider, capability):
+    if not isinstance(provider, str) or provider not in PROVIDER_CAPABILITIES:
+        fail(400, 'Unsupported agent provider')
+    if not isinstance(capability, str) or capability not in CAPABILITY_NAMES:
+        fail(500, 'Unknown agent capability')
+    if not capability_available(provider, capability):
+        fail(409, capability_reason(provider, capability))
+
+def capability_payload(provider):
+    if not isinstance(provider, str) or provider not in PROVIDER_CAPABILITIES:
+        fail(400, 'Unsupported agent provider')
+    return {name: dict(available=capability_available(provider, name),
+                       reason=None if capability_available(provider, name) else capability_reason(provider, name))
+            for name in CAPABILITY_NAMES}
 
 def tmux(request, *args, input=None):
     command = ['tmux', '-u']
@@ -46,13 +119,952 @@ def process_info(pid):
     return dict(pid=int(pid),base=base,start=fields[19],parent=int(fields[1]),group=int(fields[2]),tty=int(fields[4]),foreground=int(fields[5]))
 
 
+def process_argv(base):
+    with (base/'cmdline').open('rb') as source:
+        raw=source.read(65537)
+    if len(raw)>65536 or not raw.endswith(b'\0'):
+        return []
+    try:
+        return [part.decode(errors='strict') for part in raw[:-1].split(b'\0')]
+    except UnicodeError:
+        return []
+
+
+def _parse_cli_options(args, boolean_options, value_options, repeatable=()):
+    values={}
+    aliases={canonical:canonical for canonical in value_options}
+    aliases.update({alias:canonical for canonical,shorts in value_options.items() for alias in shorts})
+    bool_aliases={canonical:canonical for canonical in boolean_options}
+    bool_aliases.update({alias:canonical for canonical,shorts in boolean_options.items() for alias in shorts})
+    repeatable=set(repeatable)
+    i=0
+    while i<len(args):
+        token=args[i]
+        if token in ('--','-') or not token.startswith('-') or token in ('--help','-h'):
+            return None
+        inline=None
+        if token.startswith('--'):
+            option,equals,inline=token.partition('=')
+            inline=inline if equals else None
+        else:
+            option=token[:2]
+            suffix=token[2:]
+            if suffix:
+                inline=suffix
+        canonical=bool_aliases.get(option)
+        if canonical is not None:
+            if inline is not None or canonical in values:
+                return None
+            values[canonical]=True
+            i+=1
+            continue
+        canonical=aliases.get(option)
+        if canonical is None:
+            return None
+        if canonical in values and canonical not in repeatable:
+            return None
+        if inline is None:
+            i+=1
+            if i>=len(args) or args[i].startswith('-') and not (canonical=='--instructions' and args[i]=='-'):
+                return None
+            inline=args[i]
+        if canonical in repeatable:
+            values.setdefault(canonical,[]).append(inline)
+        else:
+            values[canonical]=inline
+        i+=1
+    return values
+
+
+_SESSION_BOOLEAN_OPTIONS={
+    '--resume':('-r',), '--fork':(), '--edit':(), '--history':(), '--debug':(),
+    '--no-profile':(),
+}
+_SESSION_VALUE_OPTIONS={
+    '--name':('-n',), '--session-id':('--id',), '--path':(), '--system':(),
+    '--max-tool-repetitions':(), '--max-turns':(), '--container':(),
+    '--with-extension':(), '--with-streamable-http-extension':(), '--with-builtin':(),
+    '--provider':(), '--model':(),
+}
+_RUN_BOOLEAN_OPTIONS={
+    '--interactive':('-s',), '--no-session':(), '--resume':('-r',), '--stats':(),
+    '--debug':(), '--no-profile':(), '--quiet':('-q',), '--explain':(),
+    '--render-recipe':(),
+}
+_RUN_VALUE_OPTIONS={
+    '--instructions':('-i',), '--text':('-t',), '--recipe':(), '--system':(),
+    '--params':(), '--sub-recipe':(), '--name':('-n',), '--session-id':('--id',),
+    '--path':(), '--max-tool-repetitions':(), '--max-turns':(), '--container':(),
+    '--with-extension':(), '--with-streamable-http-extension':(), '--with-builtin':(),
+    '--provider':(), '--model':(), '--output-format':(), '--scheduled-job-id':(),
+}
+
+
+def goose_invocation(argv):
+    """Return a bounded interactive mode for supported native Goose CLI forms."""
+    if not argv or os.path.basename(argv[0]).lower() not in ('goose','goose-cli'):
+        return None
+    args=argv[1:]
+    if not args:
+        return None
+    if args[0] in ('session','s'):
+        options=_parse_cli_options(args[1:],_SESSION_BOOLEAN_OPTIONS,_SESSION_VALUE_OPTIONS,
+                                   ('--with-extension','--with-streamable-http-extension','--with-builtin'))
+        if options is None:
+            return None
+        identifiers=sum(name in options for name in ('--name','--session-id','--path'))
+        if identifiers>1 or ('--session-id' in options and '--resume' not in options):
+            return None
+        if any(name in options for name in ('--fork','--edit','--history')) and '--resume' not in options:
+            return None
+        return 'session'
+    if args[0]=='run':
+        options=_parse_cli_options(args[1:],_RUN_BOOLEAN_OPTIONS,_RUN_VALUE_OPTIONS,
+                                   ('--params','--sub-recipe','--with-extension',
+                                    '--with-streamable-http-extension','--with-builtin'))
+        if options is None or '--interactive' not in options:
+            return None
+        identifiers=sum(name in options for name in ('--name','--session-id','--path'))
+        inputs=sum(name in options for name in ('--instructions','--text','--recipe'))
+        if identifiers>1 or inputs>1:
+            return None
+        if '--session-id' in options and '--resume' not in options:
+            return None
+        if '--no-session' in options and any(name in options for name in ('--resume','--name','--path')):
+            return None
+        if '--scheduled-job-id' in options or '--explain' in options or '--render-recipe' in options:
+            return None
+        if '--recipe' in options and '--system' in options:
+            return None
+        return 'run-interactive'
+    return None
+
+
+def goose_data_dir(env, platform=None, home=None):
+    """Resolve Goose's native data directory from path-only process settings."""
+    platform=platform or sys.platform
+    if platform.startswith('win'):
+        from pathlib import PureWindowsPath
+        path_type=PureWindowsPath
+    else:
+        from pathlib import PurePosixPath
+        path_type=PurePosixPath
+    home_path=path_type(home) if home else path_type(env.get('HOME',''))
+    if not str(home_path) or not home_path.is_absolute():
+        home_path=path_type(Path.home().as_posix())
+    root=path_type(env.get('GOOSE_PATH_ROOT',''))
+    if root.is_absolute():
+        return root/'data'
+    if platform.startswith('win'):
+        appdata=path_type(env.get('APPDATA',''))
+        if not appdata.is_absolute():
+            appdata=home_path/'AppData'/'Roaming'
+        return appdata/'Block'/'goose'/'data'
+    if platform=='darwin':
+        return home_path/'Library'/'Application Support'/'Block'/'goose'
+    xdg=path_type(env.get('XDG_DATA_HOME',''))
+    base=xdg if xdg.is_absolute() else home_path/'.local'/'share'
+    return base/'goose'
+
+
+def goose_data_identity(path):
+    canonical=os.path.realpath(str(path))
+    try:
+        info=os.stat(canonical)
+        store=os.stat(os.path.join(canonical,'sessions','sessions.db'))
+        identity=f'{canonical}:{info.st_dev}:{info.st_ino}:store:{store.st_dev}:{store.st_ino}'
+    except FileNotFoundError:
+        try:
+            info=os.stat(canonical)
+            identity=f'{canonical}:{info.st_dev}:{info.st_ino}:store:missing'
+        except OSError:
+            identity=f'{canonical}:missing:store:missing'
+    except OSError:
+        identity=f'{canonical}:missing'
+    return hashlib.sha256(('goose-data-v1:'+identity).encode()).hexdigest()
+
+
+GOOSE_STORE_SCHEMA_VERSION = 17
+GOOSE_STORE_MAX_QUERY_SECONDS = 0.25
+GOOSE_STORE_MAX_TOTAL_SECONDS = 1.0
+GOOSE_STORE_MAX_QUERY_STEPS = 1200
+GOOSE_STORE_MAX_SESSIONS = 20
+GOOSE_STORE_MAX_MESSAGES = 100
+GOOSE_STORE_MAX_ACTIVITY_ROWS = 2000
+GOOSE_STORE_MAX_ACTIVITY_BYTES = 2 * 1024 * 1024
+GOOSE_STORE_MAX_ACTIVITY_EVENTS = 5000
+GOOSE_STORE_MAX_HISTORY_PAGES = 5
+GOOSE_STORE_MAX_HISTORY_ROWS = GOOSE_STORE_MAX_MESSAGES * GOOSE_STORE_MAX_HISTORY_PAGES
+GOOSE_STORE_MAX_HISTORY_BYTES = 2 * 1024 * 1024
+GOOSE_STORE_MAX_CELL_BYTES = 128 * 1024
+GOOSE_STORE_MAX_PAGE_BYTES = 512 * 1024
+GOOSE_STORE_MAX_WAL_BYTES = 256 * 1024 * 1024
+GOOSE_STORE_MAX_SHM_BYTES = 64 * 1024 * 1024
+
+
+def _goose_file_identity(path, *, required=True):
+    try:
+        info=os.lstat(path)
+    except FileNotFoundError:
+        if required: fail(409,'Goose session store is unavailable')
+        return None
+    except OSError:
+        fail(409,'Goose session store is unavailable')
+    if (stat.S_ISLNK(info.st_mode) or info.st_uid!=os.geteuid()
+            or info.st_mode & 0o022):
+        fail(409,'Goose session store path is unsafe')
+    if not stat.S_ISREG(info.st_mode):
+        fail(409,'Goose session store is unavailable')
+    return (info.st_dev,info.st_ino,info.st_mode & 0o170000)
+
+
+def _goose_text_is_bounded(value,limit,nullable=False):
+    if value is None: return nullable
+    if not isinstance(value,str) or len(value)>limit or '\0' in value: return False
+    try: value.encode('utf-8')
+    except UnicodeError: return False
+    return True
+
+
+class GooseSessionStore:
+    """Read schema-17 Goose history without initializing or mutating its store."""
+    _SCHEMA_COLUMNS={
+        'schema_version':frozenset(('version',)),
+        'sessions':frozenset(('id','name','session_type','working_dir','created_at',
+                              'updated_at','archived_at','schedule_id')),
+        'messages':frozenset(('id','message_id','session_id','role','content_json',
+                              'created_timestamp','metadata_json')),
+    }
+
+    def __init__(self,observation):
+        self.root=Path(os.path.realpath(observation.get('storage_root','')))
+        self.expected_identity=observation.get('storage_identity')
+        self.cwd=observation.get('cwd')
+        self.path=self.root/'sessions'/'sessions.db'
+        self.connection=None
+        self._opened_at=0.0
+        self._deadline=0.0
+        self._steps=0
+        self._identity=None
+        self._directories=None
+        self._sidecars={}
+
+    def _path_state(self):
+        try:
+            root_info=os.stat(self.root)
+            sessions_path=self.root/'sessions'
+            sessions_info=os.lstat(sessions_path)
+        except OSError:
+            fail(409,'Goose session store is unavailable')
+        if (not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid!=os.geteuid()
+                or root_info.st_mode & 0o022 or stat.S_ISLNK(sessions_info.st_mode)
+                or not stat.S_ISDIR(sessions_info.st_mode) or sessions_info.st_uid!=os.geteuid()
+                or sessions_info.st_mode & 0o022):
+            fail(409,'Goose session store path is unsafe')
+        db_identity=_goose_file_identity(self.path)
+        self._directories=(root_info.st_dev,root_info.st_ino,
+                           sessions_info.st_dev,sessions_info.st_ino)
+        return (db_identity,self._directories)
+
+    def _check_identity(self):
+        if (not isinstance(self.expected_identity,str)
+                or not re.fullmatch(r'[0-9a-f]{64}',self.expected_identity)
+                or goose_data_identity(self.root)!=self.expected_identity):
+            fail(409,'Goose session store changed; refresh the agent')
+        current=self._path_state()
+        if current!=self._identity:
+            fail(409,'Goose session store changed; refresh the agent')
+        for suffix,identity in self._sidecars.items():
+            path=Path(str(self.path)+suffix)
+            if _goose_file_identity(path,required=False)!=identity:
+                fail(409,'Goose session store changed; refresh the agent')
+
+    def _progress(self):
+        self._steps+=1
+        if (self._steps>GOOSE_STORE_MAX_QUERY_STEPS
+                or time.monotonic()>self._deadline
+                or time.monotonic()-self._opened_at>GOOSE_STORE_MAX_TOTAL_SECONDS):
+            return 1
+        return 0
+
+    def _query(self,sql,parameters=()):
+        if self.connection is None: fail(409,'Goose session store is unavailable')
+        self._steps=0
+        self._deadline=min(time.monotonic()+GOOSE_STORE_MAX_QUERY_SECONDS,
+                           self._opened_at+GOOSE_STORE_MAX_TOTAL_SECONDS)
+        try:
+            rows=self.connection.execute(sql,parameters).fetchall()
+        except (sqlite3.Error,UnicodeError,ValueError,OverflowError):
+            fail(409,'Goose session store is busy, corrupt or outside the read budget')
+        self._check_identity()
+        return rows
+
+    def __enter__(self):
+        try:
+            if (not self.root.is_absolute() or not _goose_text_is_bounded(self.cwd,4096)
+                    or not os.path.isabs(self.cwd)):
+                fail(409,'Goose session store is unavailable')
+            if not isinstance(self.expected_identity,str) or goose_data_identity(self.root)!=self.expected_identity:
+                fail(409,'Goose session store changed; refresh the agent')
+            self._identity=self._path_state()
+            with self.path.open('rb') as source:
+                header=source.read(100)
+            if len(header)<100 or header[:16]!=b'SQLite format 3\0' or header[18:20] not in (b'\x01\x01',b'\x02\x02'):
+                fail(409,'Goose session store is corrupt or unsupported')
+            wal_mode=header[18:20]==b'\x02\x02'
+            for suffix in ('-wal','-shm','-journal'):
+                sidecar=Path(str(self.path)+suffix)
+                self._sidecars[suffix]=_goose_file_identity(sidecar,required=False)
+                if self._sidecars[suffix] is not None:
+                    try: sidecar_size=os.stat(sidecar).st_size
+                    except OSError: fail(409,'Goose session store changed; refresh the agent')
+                    limit=(GOOSE_STORE_MAX_WAL_BYTES if suffix=='-wal'
+                           else GOOSE_STORE_MAX_SHM_BYTES if suffix=='-shm' else 0)
+                    if suffix=='-journal' or sidecar_size>limit:
+                        fail(409,'Goose journal state is unavailable for a safe read')
+            if wal_mode:
+                if not self._sidecars['-wal'] or not self._sidecars['-shm'] or self._sidecars['-journal']:
+                    fail(409,'Goose WAL state is unavailable for a safe read')
+            elif any(self._sidecars.values()):
+                fail(409,'Goose journal state is unavailable for a safe read')
+            if goose_data_identity(self.root)!=self.expected_identity:
+                fail(409,'Goose session store changed; refresh the agent')
+            uri=self.path.as_uri()+'?mode=ro'
+            self.connection=sqlite3.connect(uri,uri=True,timeout=.1,isolation_level=None)
+            self.connection.enable_load_extension(False)
+            if hasattr(self.connection,'setlimit'):
+                limits=(('SQLITE_LIMIT_LENGTH',GOOSE_STORE_MAX_CELL_BYTES),
+                        ('SQLITE_LIMIT_SQL_LENGTH',8192),('SQLITE_LIMIT_COLUMN',32),
+                        ('SQLITE_LIMIT_ATTACHED',0))
+                for name,value in limits:
+                    if hasattr(sqlite3,name): self.connection.setlimit(getattr(sqlite3,name),value)
+            self.connection.execute('PRAGMA query_only=ON')
+            self.connection.execute('PRAGMA trusted_schema=OFF')
+            self.connection.execute('PRAGMA busy_timeout=100')
+            self.connection.set_progress_handler(self._progress,1000)
+            self._opened_at=time.monotonic()
+            self.connection.execute('BEGIN')
+            self._verify_schema()
+            self._check_identity()
+            return self
+        except Failure:
+            self.close()
+            raise
+        except (OSError,sqlite3.Error,ValueError,TypeError):
+            self.close()
+            fail(409,'Goose session store is unavailable or unsupported')
+
+    def _verify_schema(self):
+        objects=self._query(
+            "SELECT type,name,sql FROM sqlite_schema "
+            "WHERE name IN ('schema_version','sessions','messages')")
+        if (len(objects)!=3 or any(row[0]!='table' or row[1] not in self._SCHEMA_COLUMNS
+                or not isinstance(row[2],str) or len(row[2])>8192
+                or re.match(r'(?is)^\s*CREATE\s+VIRTUAL\s+TABLE\b',row[2]) for row in objects)):
+            fail(409,'Goose session store schema is unsupported')
+        for table,required in self._SCHEMA_COLUMNS.items():
+            columns=self._query(f'PRAGMA table_info("{table}")')
+            names={row[1] for row in columns if len(row)>1 and isinstance(row[1],str)}
+            if not required.issubset(names):
+                fail(409,'Goose session store schema is unsupported')
+        versions=self._query('SELECT version FROM schema_version LIMIT 2')
+        if (len(versions)!=1 or isinstance(versions[0][0],bool)
+                or not isinstance(versions[0][0],int)
+                or versions[0][0]!=GOOSE_STORE_SCHEMA_VERSION):
+            fail(409,'Goose session store schema is unsupported')
+
+    def _eligible_session(self,session_id):
+        rows=self._query(
+            "SELECT id,session_type,working_dir,schedule_id FROM sessions WHERE id=? LIMIT 2",
+            (session_id,))
+        if len(rows)!=1:
+            fail(409,'Goose conversation is no longer available')
+        row=rows[0]
+        if (not _goose_text_is_bounded(row[0],256) or row[0]!=session_id or row[1]!='user'
+                or row[3] is not None or not _goose_text_is_bounded(row[2],4096)
+                or not os.path.isabs(row[2])
+                or os.path.normcase(os.path.realpath(row[2]))!=os.path.normcase(os.path.realpath(self.cwd))):
+            fail(409,'Goose conversation is not an available project session')
+        return row
+
+    def sessions(self):
+        rows=self._query(
+            "SELECT id,name,session_type,working_dir,created_at,updated_at,archived_at,schedule_id "
+            "FROM sessions WHERE working_dir=? AND session_type='user' AND schedule_id IS NULL "
+            "ORDER BY rowid DESC LIMIT ?",
+            (self.cwd,GOOSE_STORE_MAX_SESSIONS+1))
+        candidates=[]
+        limited=len(rows)>GOOSE_STORE_MAX_SESSIONS
+        for row in rows[:GOOSE_STORE_MAX_SESSIONS]:
+            (session_id,name,session_type,working_dir,created_at,updated_at,archived_at,schedule_id)=row
+            if (not _goose_text_is_bounded(session_id,256) or not session_id
+                    or session_type!='user' or schedule_id is not None
+                    or not _goose_text_is_bounded(working_dir,4096)
+                    or not os.path.isabs(working_dir)
+                    or os.path.normcase(os.path.realpath(working_dir))!=os.path.normcase(os.path.realpath(self.cwd))
+                    or not _goose_text_is_bounded(name,512,nullable=True)
+                    or not _goose_text_is_bounded(created_at,64)
+                    or not _goose_text_is_bounded(updated_at,64)
+                    or not _goose_text_is_bounded(archived_at,64,nullable=True)):
+                limited=True
+                continue
+            ident=hashlib.sha256(('cc-goose-session-v1:'+self.expected_identity+':'+session_id).encode()).hexdigest()
+            candidates.append(dict(id=ident,session=session_id,name=name,created_at=created_at,
+                                   updated_at=updated_at,archived=archived_at is not None,linked=False))
+        return dict(conversations=candidates,limited=limited,store_identity=self.expected_identity)
+
+    def messages(self,session_id,before=None):
+        if not _goose_text_is_bounded(session_id,256) or not session_id:
+            fail(400,'Invalid Goose conversation')
+        self._eligible_session(session_id)
+        parameters=[session_id]
+        clause=''
+        if before is not None:
+            if (not isinstance(before,(list,tuple)) or len(before)!=2
+                    or any(not isinstance(value,str) or not value.isascii() or not value.isdecimal() for value in before)):
+                fail(400,'Invalid Goose history cursor')
+            timestamp,message_id=map(int,before)
+            if timestamp>2**63-1 or message_id>2**63-1 or message_id<1:
+                fail(400,'Invalid Goose history cursor')
+            clause=' AND (created_timestamp < ? OR (created_timestamp = ? AND id < ?))'
+            parameters.extend((timestamp,timestamp,message_id))
+        parameters.append(GOOSE_STORE_MAX_MESSAGES+1)
+        rows=self._query(
+            'SELECT id,message_id,session_id,role,content_json,created_timestamp,metadata_json '
+            'FROM messages WHERE session_id=?'+clause+
+            ' ORDER BY created_timestamp DESC,id DESC LIMIT ?',parameters)
+        messages=[]
+        budget=GOOSE_STORE_MAX_PAGE_BYTES
+        source_bytes=0
+        fingerprint=hashlib.sha256(b'goose-source-page-v1\0')
+        limited=len(rows)>GOOSE_STORE_MAX_MESSAGES
+        selected=rows[:GOOSE_STORE_MAX_MESSAGES]
+        for row in selected:
+            (row_id,message_id,owner,role,content_json,created_timestamp,metadata_json)=row
+            try:
+                encoded=json.dumps(row,separators=(',',':'),ensure_ascii=True).encode('ascii')
+            except (TypeError,ValueError,UnicodeError,RecursionError):
+                encoded=repr(row).encode('utf-8','replace')
+                limited=True
+            source_bytes+=len(encoded)
+            fingerprint.update(len(encoded).to_bytes(4,'big'))
+            fingerprint.update(encoded)
+            if (not isinstance(row_id,int) or isinstance(row_id,bool) or row_id<1 or row_id>2**63-1
+                    or owner!=session_id or role not in ('user','assistant')
+                    or not isinstance(created_timestamp,int) or isinstance(created_timestamp,bool)
+                    or created_timestamp<0 or created_timestamp>2**63-1
+                    or not _goose_text_is_bounded(message_id,256,nullable=True)
+                    or not isinstance(content_json,str) or not isinstance(metadata_json,(str,type(None)))):
+                limited=True
+                continue
+            try:
+                content_size=len(content_json.encode('utf-8'))
+                metadata_size=len(metadata_json.encode('utf-8')) if metadata_json is not None else 0
+            except UnicodeError:
+                limited=True
+                continue
+            if (content_size>GOOSE_STORE_MAX_CELL_BYTES//2 or metadata_size>16*1024
+                    or content_size+metadata_size>budget):
+                limited=True
+                continue
+            try:
+                content=json.loads(content_json)
+                metadata=json.loads(metadata_json) if metadata_json else {}
+            except (ValueError,UnicodeError,RecursionError):
+                limited=True
+                continue
+            if (not isinstance(content,list) or len(content)>1024 or not isinstance(metadata,dict)
+                    or any(not isinstance(block,dict) or not isinstance(block.get('type'),str)
+                           or len(block['type'])>64 for block in content)):
+                limited=True
+                continue
+            user_visible=metadata.get('userVisible')
+            if not isinstance(user_visible,bool): user_visible=None
+            messages.append(dict(id=str(row_id),message_id=message_id,role=role,
+                                 created_timestamp=str(created_timestamp),content=content,
+                                 user_visible=user_visible,
+                                 turn_context=metadata.get('turnContext') is True,
+                                 compaction_summary=metadata.get('compactionSummary') is True))
+            budget-=content_size+metadata_size
+        older=None
+        if len(rows)>GOOSE_STORE_MAX_MESSAGES and selected:
+            oldest=selected[-1]
+            if isinstance(oldest[0],int) and isinstance(oldest[5],int):
+                older=(str(oldest[5]),str(oldest[0]))
+        messages.reverse()
+        return dict(messages=messages,older=older,limited=limited,store_identity=self.expected_identity,
+                    fingerprint=fingerprint.hexdigest(),source_bytes=source_bytes)
+
+    def history_window_fingerprint(self,session_id):
+        """Fingerprint every source row a client may load across the bounded page window."""
+        self._eligible_session(session_id)
+        self._steps=0
+        self._deadline=min(time.monotonic()+GOOSE_STORE_MAX_QUERY_SECONDS,
+                           self._opened_at+GOOSE_STORE_MAX_TOTAL_SECONDS)
+        fingerprint=hashlib.sha256(b'goose-history-window-v1\0')
+        source_bytes=0
+        try:
+            cursor=self.connection.execute(
+                'SELECT id,message_id,session_id,role,content_json,created_timestamp,metadata_json '
+                'FROM messages WHERE session_id=? ORDER BY created_timestamp DESC,id DESC LIMIT ?',
+                (session_id,GOOSE_STORE_MAX_HISTORY_ROWS))
+            while True:
+                row=cursor.fetchone()
+                if row is None: break
+                try: encoded=json.dumps(row,separators=(',',':'),ensure_ascii=True).encode('ascii')
+                except (TypeError,ValueError,UnicodeError,RecursionError):
+                    encoded=repr(row).encode('utf-8','replace')
+                source_bytes+=len(encoded)
+                if source_bytes>GOOSE_STORE_MAX_HISTORY_BYTES or time.monotonic()>self._deadline:
+                    cursor.close()
+                    return dict(complete=False,fingerprint=None,source_bytes=source_bytes)
+                fingerprint.update(len(encoded).to_bytes(4,'big'));fingerprint.update(encoded)
+            cursor.close()
+            self._check_identity()
+            return dict(complete=True,fingerprint=fingerprint.hexdigest(),source_bytes=source_bytes)
+        except (sqlite3.Error,UnicodeError,ValueError,OverflowError):
+            return dict(complete=False,fingerprint=None,source_bytes=source_bytes)
+
+    def activity_occurrences(self,session_id,wanted):
+        """Pair bounded visible-page tool calls with persisted results by ID and occurrence."""
+        if not wanted: return dict(complete=True,calls={},results={})
+        self._eligible_session(session_id)
+        self._steps=0
+        self._deadline=min(time.monotonic()+GOOSE_STORE_MAX_QUERY_SECONDS,
+                           self._opened_at+GOOSE_STORE_MAX_TOTAL_SECONDS)
+        try:
+            cursor=self.connection.execute(
+                'SELECT id,role,content_json,created_timestamp,metadata_json FROM messages '
+                'WHERE session_id=? ORDER BY created_timestamp,id LIMIT ?',
+                (session_id,GOOSE_STORE_MAX_ACTIVITY_ROWS+1))
+            request_counts={};response_counts={};wanted_calls={};results={}
+            scanned=0;source_bytes=0;event_count=0;complete=True
+            while True:
+                row=cursor.fetchone()
+                if row is None: break
+                scanned+=1
+                if scanned>GOOSE_STORE_MAX_ACTIVITY_ROWS:
+                    complete=False;break
+                row_id,role,content_json,created_timestamp,metadata_json=row
+                if (not isinstance(row_id,int) or row_id<1 or role not in ('user','assistant')
+                        or not isinstance(content_json,str) or not isinstance(metadata_json,(str,type(None)))):
+                    complete=False;break
+                try:
+                    source_bytes+=len(content_json.encode('utf-8'))+(len(metadata_json.encode('utf-8')) if metadata_json else 0)
+                    if source_bytes>GOOSE_STORE_MAX_ACTIVITY_BYTES:
+                        complete=False;break
+                    content=json.loads(content_json);metadata=json.loads(metadata_json) if metadata_json else {}
+                except (ValueError,UnicodeError,RecursionError):
+                    complete=False;break
+                if not isinstance(content,list) or len(content)>1024 or not isinstance(metadata,dict):
+                    complete=False;break
+                visible=(metadata.get('userVisible') is True
+                         and metadata.get('turnContext') is not True
+                         and metadata.get('compactionSummary') is not True)
+                for index,block in enumerate(content):
+                    if not isinstance(block,dict): continue
+                    category=block.get('type')
+                    if category not in ('toolRequest','toolResponse'): continue
+                    block_visible=goose_block_audience_visible(block)
+                    source_id=block.get('id')
+                    if source_id is not None and (not isinstance(source_id,str) or not source_id or len(source_id)>256):
+                        continue
+                    event_count+=1
+                    if event_count>GOOSE_STORE_MAX_ACTIVITY_EVENTS:
+                        complete=False;break
+                    counts=request_counts if category=='toolRequest' else response_counts
+                    occurrence=counts.get(source_id,0);counts[source_id]=occurrence+1
+                    location=(row_id,index)
+                    if category=='toolRequest' and location in wanted and visible and block_visible and role=='assistant':
+                        wanted_calls[location]=(source_id,occurrence)
+                    elif category=='toolResponse' and visible and block_visible and role=='user':
+                        pair=(source_id,occurrence)
+                        if pair in wanted_calls.values():
+                            results[pair]=(block,created_timestamp)
+                if not complete: break
+                if time.monotonic()>self._deadline or time.monotonic()-self._opened_at>GOOSE_STORE_MAX_TOTAL_SECONDS:
+                    complete=False;break
+            cursor.close()
+            self._check_identity()
+            if not complete:
+                return dict(complete=False,calls={},results={})
+            return dict(complete=True,calls=wanted_calls,results=results)
+        except (sqlite3.Error,UnicodeError,ValueError,OverflowError):
+            return dict(complete=False,calls={},results={})
+
+    def reply_row(self,session_id,order_key):
+        match=re.fullmatch(r'([0-9]{20}):([0-9]{20}):[0-9]{6}',order_key or '')
+        if not match: return None
+        timestamp,row_id=map(int,match.groups())
+        rows=self._query('SELECT message_id,role,created_timestamp,metadata_json,content_json FROM messages WHERE session_id=? AND id=? LIMIT 2',
+                         (session_id,row_id))
+        if len(rows)!=1: return None
+        message_id,role,stored_timestamp,metadata_json,content_json=rows[0]
+        if (stored_timestamp!=timestamp or role!='assistant' or not isinstance(metadata_json,(str,type(None)))
+                or not isinstance(content_json,str)): return None
+        try:
+            metadata=json.loads(metadata_json) if metadata_json else {}
+            content=json.loads(content_json)
+        except (ValueError,UnicodeError,RecursionError): return None
+        if (not isinstance(metadata,dict) or metadata.get('userVisible') is not True
+                or metadata.get('turnContext') is True or metadata.get('compactionSummary') is True): return None
+        return dict(message_id=message_id,content=content)
+
+    def verify_current(self):
+        self._check_identity()
+
+    def close(self):
+        if self.connection is not None:
+            try: self.connection.close()
+            except sqlite3.Error: pass
+            self.connection=None
+
+    def __exit__(self,exception_type,exception,_traceback):
+        try:
+            if exception_type is None: self.verify_current()
+        finally:
+            self.close()
+        return False
+
+
+def goose_store_sessions(observation):
+    require_provider(observation.get('kind'))
+    if observation['kind']!='goose': fail(400,'Unsupported agent provider')
+    with GooseSessionStore(observation) as store:
+        return store.sessions()
+
+
+def goose_store_messages(observation,session_id,before=None):
+    require_provider(observation.get('kind'))
+    if observation['kind']!='goose': fail(400,'Unsupported agent provider')
+    with GooseSessionStore(observation) as store:
+        return store.messages(session_id,before)
+
+
+def goose_block_audience_visible(block):
+    annotations=block.get('annotations') if isinstance(block,dict) else None
+    if not isinstance(annotations,dict) or 'audience' not in annotations:
+        return True
+    audience=annotations.get('audience')
+    return isinstance(audience,list) and 'user' in audience and all(value in ('user','assistant') for value in audience)
+
+
+def goose_message_time(value):
+    try:
+        timestamp=int(value)
+        if timestamp<0 or timestamp>253402300799: return ''
+        return datetime.fromtimestamp(timestamp,timezone.utc).isoformat().replace('+00:00','Z')
+    except (TypeError,ValueError,OverflowError,OSError):
+        return ''
+
+
+def goose_order_key(timestamp,row_id,block=0):
+    return f'{timestamp:020d}:{row_id:020d}:{max(0,block):06d}'
+
+
+def goose_row_visible(row):
+    return (row.get('user_visible') is True and not row.get('turn_context')
+            and not row.get('compaction_summary'))
+
+
+def goose_chat_text(row):
+    pieces=[];first_order=0
+    for index,block in enumerate(row.get('content',[])[:1024]):
+        if not isinstance(block,dict) or not goose_block_audience_visible(block): continue
+        kind=block.get('type')
+        if kind=='text' and isinstance(block.get('text'),str):
+            if block['text']:
+                if not pieces: first_order=index
+                pieces.append(block['text'])
+        elif kind in ('image','document'):
+            if not pieces: first_order=index
+            pieces.append('[Image omitted]' if kind=='image' else '[Document omitted]')
+    text='\n'.join(pieces)
+    return text,first_order
+
+
+def goose_result_content(value):
+    if isinstance(value,list): content=value
+    elif isinstance(value,dict) and isinstance(value.get('content'),list): content=value['content']
+    else: return '',False
+    parts=[]
+    for block in content[:32]:
+        if not isinstance(block,dict) or not goose_block_audience_visible(block): continue
+        kind=block.get('type')
+        if kind=='text' and isinstance(block.get('text'),str): parts.append(block['text'])
+        elif kind=='image': parts.append('[Image omitted]')
+        elif kind=='audio': parts.append('[Audio omitted]')
+        elif kind in ('resource','resource_link'): parts.append('[Resource omitted]')
+    return '\n'.join(parts),False
+
+
+def goose_tool_result(block):
+    wrapper=block.get('toolResult')
+    error=False;output=''
+    if isinstance(wrapper,dict) and wrapper.get('status')=='error':
+        error=True
+        value=wrapper.get('error')
+        output=value if isinstance(value,str) else ''
+    else:
+        value=wrapper.get('value') if isinstance(wrapper,dict) and wrapper.get('status')=='success' else wrapper
+        if isinstance(value,dict) and value.get('isError') is True: error=True
+        output,_=goose_result_content(value)
+    return ('error' if error else 'completed'),output
+
+
+def goose_tool_request(block):
+    wrapper=block.get('toolCall')
+    if isinstance(wrapper,dict) and wrapper.get('status')=='error':
+        value=wrapper.get('error')
+        return 'Tool call','',(value[:12001] if isinstance(value,str) and value else '')
+    value=wrapper.get('value') if isinstance(wrapper,dict) and wrapper.get('status')=='success' else wrapper
+    if not isinstance(value,dict): return 'Tool call','', ''
+    name=value.get('name')
+    title=name[:160] if isinstance(name,str) and name else 'Tool call'
+    arguments=value.get('arguments')
+    if not isinstance(arguments,(dict,list,str)): return title,'',''
+    try: rendered=arguments if isinstance(arguments,str) else json.dumps(arguments,ensure_ascii=True,indent=2)
+    except (TypeError,ValueError,RecursionError): return title,'',''
+    return title,rendered[:4000],rendered[4000:]
+
+
+def goose_activity_entries(rows,occurrences,conversation_id):
+    entries=[];limited=not occurrences.get('complete',False)
+    result_by_pair=occurrences.get('results',{}) if occurrences.get('complete') else {}
+    for row in rows:
+        if not goose_row_visible(row): continue
+        row_id=int(row['id']);timestamp=goose_message_time(row['created_timestamp'])
+        for index,block in enumerate(row['content'][:1024]):
+            if not isinstance(block,dict) or not goose_block_audience_visible(block): continue
+            category=block.get('type')
+            if category=='thinking' and row.get('role')=='assistant':
+                text=block.get('thinking')
+                if isinstance(text,str) and text.strip():
+                    entries.append(dict(id=f'goose-activity:{conversation_id}:{row_id}:{index}',order=index,
+                                        order_key=goose_order_key(int(row['created_timestamp']),row_id,index),timestamp=timestamp,
+                                        kind='thinking',title='Thinking',text=text[:12000],truncated=len(text)>12000,status='recorded'))
+            elif category=='toolRequest' and row.get('role')=='assistant':
+                location=(row_id,index);pair=occurrences.get('calls',{}).get(location)
+                title,arguments,overflow=goose_tool_request(block)
+                status='pending';output='';output_truncated=False
+                if overflow:
+                    status='error';output=overflow[:12000];output_truncated=len(overflow)>12000
+                elif pair in result_by_pair:
+                    status,raw_output=goose_tool_result(result_by_pair[pair][0]);output=raw_output[:12000]
+                    output_truncated=len(raw_output)>12000
+                entry=dict(id=f'goose-activity:{conversation_id}:{row_id}:{index}',order=index,
+                           order_key=goose_order_key(int(row['created_timestamp']),row_id,index),timestamp=timestamp,
+                           kind='tool',title=title,arguments=arguments,status=status,
+                           truncated=len(arguments)>4000 or output_truncated)
+                if output: entry['output']=output
+                entries.append(entry)
+    entries.sort(key=lambda entry:(entry['order_key'],entry['order']))
+    if len(entries)>100: limited=True;entries=entries[-100:]
+    budget=256000
+    for index,entry in enumerate(entries):
+        allowance=budget//max(1,len(entries)-index);shortened=entry.get('truncated',False)
+        for key in ('text','arguments','output'):
+            value=entry.get(key,'');take=min(len(value),allowance)
+            entry[key]=value[:take];allowance-=take;budget-=take;shortened=shortened or take<len(value)
+        entry['truncated']=shortened
+    return entries,limited
+
+
+def goose_history_store_id(observation,chosen):
+    return hashlib.sha256(('goose-history-v1:'+str(observation.get('storage_identity'))+':'+chosen['session']).encode()).hexdigest()
+
+
+def goose_history_revision(store_id,fingerprint):
+    return hashlib.sha256(f'goose-revision-v1:{store_id}:{fingerprint}'.encode()).hexdigest()
+
+
+def encode_goose_history_cursor(store_id,chosen,revision,pages,before):
+    payload=dict(v=1,provider='goose',store=store_id,conversation=chosen['id'],session=chosen['session'],
+                 revision=revision,pages=pages,before=before)
+    raw=json.dumps(payload,separators=(',',':'),sort_keys=True).encode()
+    token='cc-history-v1.'+base64.urlsafe_b64encode(raw).decode().rstrip('=')
+    if len(token)>1024: fail(500,'Goose history cursor exceeded its limit')
+    return token
+
+
+def decode_goose_history_cursor(token,store_id,chosen):
+    if not isinstance(token,str) or len(token)>1024 or not token.startswith('cc-history-v1.'):
+        fail(400,'Invalid history cursor')
+    encoded=token[len('cc-history-v1.'):]
+    try:
+        raw=base64.b64decode(encoded+'='*((-len(encoded))%4),altchars=b'-_',validate=True)
+        payload=json.loads(raw)
+    except (ValueError,UnicodeError): fail(400,'Invalid history cursor')
+    if not isinstance(payload,dict) or set(payload)!={'v','provider','store','conversation','session','revision','pages','before'} or payload.get('v')!=1:
+        fail(400,'Invalid history cursor')
+    if (payload.get('provider')!='goose' or payload.get('store')!=store_id
+            or payload.get('conversation')!=chosen.get('id') or payload.get('session')!=chosen.get('session')):
+        fail(409,'History cursor belongs to another source; reload the latest history')
+    pages=payload.get('pages');before=payload.get('before')
+    if (not isinstance(pages,list) or not 1<=len(pages)<GOOSE_STORE_MAX_HISTORY_PAGES
+            or not isinstance(payload.get('revision'),str) or not re.fullmatch(r'[0-9a-f]{64}',payload['revision'])):
+        fail(400,'Invalid history cursor')
+    for page in pages:
+        if not isinstance(page,dict) or set(page)!={'before','fingerprint'} or not re.fullmatch(r'[0-9a-f]{64}',str(page.get('fingerprint',''))):
+            fail(400,'Invalid history cursor')
+        marker=page.get('before')
+        if marker is not None and (not isinstance(marker,list) or len(marker)!=2 or any(not isinstance(value,str) or not value.isascii() or not value.isdecimal() for value in marker)):
+            fail(400,'Invalid history cursor')
+    if not isinstance(before,list) or len(before)!=2 or any(not isinstance(value,str) or not value.isascii() or not value.isdecimal() for value in before):
+        fail(400,'Invalid history cursor')
+    if any(int(value)>2**63-1 for value in before): fail(400,'Invalid history cursor')
+    return payload
+
+
+def goose_history_page(observation,chosen,request):
+    require_capability('goose','project_history')
+    if request.get('before') is not None: fail(400,'Goose history requires an opaque cursor')
+    session_id=chosen.get('session')
+    if not _goose_text_is_bounded(session_id,256) or not session_id: fail(409,'Goose conversation is unavailable')
+    store_id=goose_history_store_id(observation,chosen)
+    with GooseSessionStore(observation) as store:
+        latest=store.messages(session_id)
+        window=store.history_window_fingerprint(session_id)
+        revision_source=window['fingerprint'] if window['complete'] else 'partial:'+latest['fingerprint']
+        revision=goose_history_revision(store_id,revision_source)
+        token=request.get('history_cursor')
+        reset=False
+        loaded=[]
+        page_specs=[]
+        current=latest
+        if token is not None:
+            cursor=decode_goose_history_cursor(token,store_id,chosen)
+            verified=[]
+            changed=cursor['revision']!=revision or cursor['pages'][0].get('before') is not None or cursor['pages'][0]['fingerprint']!=latest['fingerprint']
+            for page_spec in cursor['pages']:
+                if changed: break
+                snapshot=latest if page_spec.get('before') is None else store.messages(session_id,page_spec['before'])
+                if snapshot['fingerprint']!=page_spec['fingerprint']:
+                    changed=True;break
+                verified.append(snapshot)
+            if (not changed and (not verified or list(verified[-1].get('older') or ())!=cursor['before'])):
+                changed=True
+            if changed:
+                reset=True;current=latest;loaded=[latest];page_specs=[dict(before=None,fingerprint=latest['fingerprint'])]
+            else:
+                current=store.messages(session_id,cursor['before'])
+                loaded=verified+[current]
+                page_specs=[dict(before=page.get('before'),fingerprint=page['fingerprint']) for page in cursor['pages']]
+                page_specs.append(dict(before=cursor['before'],fingerprint=current['fingerprint']))
+        else:
+            loaded=[latest];page_specs=[dict(before=None,fingerprint=latest['fingerprint'])]
+
+        loaded_bytes=sum(page.get('source_bytes',0) for page in loaded)
+        raw_rows=[row for page in loaded for row in page['messages']]
+        wanted=set()
+        for row in raw_rows:
+            if goose_row_visible(row) and row.get('role')=='assistant':
+                for index,block in enumerate(row['content'][:1024]):
+                    if isinstance(block,dict) and block.get('type')=='toolRequest' and goose_block_audience_visible(block):
+                        wanted.add((int(row['id']),index))
+        occurrences=store.activity_occurrences(session_id,wanted)
+        activities,activity_limited=goose_activity_entries(raw_rows,occurrences,chosen['id'])
+        messages=[]
+        message_budget=512000
+        for row in current['messages']:
+            if message_budget<=0: break
+            if not goose_row_visible(row): continue
+            text,order=goose_chat_text(row)
+            if not text.strip(): continue
+            row_id=int(row['id']);timestamp=int(row['created_timestamp'])
+            allowance=message_budget
+            shown=text[:min(16000,allowance)]
+            message_budget-=len(shown)
+            digest=hashlib.sha256(f"goose-message-v1:{store_id}:{row_id}:{row['role']}:{text}".encode()).hexdigest()
+            message=dict(id=f'goose-message:{chosen["id"]}:{row_id}',cursor=digest,
+                         role=row['role'],text=shown,truncated=len(shown)<len(text),
+                         order=order,order_key=goose_order_key(timestamp,row_id,order),
+                         reply_order_key=goose_order_key(timestamp,row_id),timestamp=goose_message_time(timestamp))
+            messages.append(message)
+            if message_budget<=0: break
+
+        page_limited=(any(page.get('limited') for page in loaded) or activity_limited
+                      or loaded_bytes>GOOSE_STORE_MAX_HISTORY_BYTES or not window['complete'])
+        next_cursor=None
+        if (window['complete'] and current.get('older') is not None and len(page_specs)<GOOSE_STORE_MAX_HISTORY_PAGES
+                and loaded_bytes<GOOSE_STORE_MAX_HISTORY_BYTES):
+            next_cursor=encode_goose_history_cursor(store_id,chosen,revision,page_specs,current['older'])
+        notice=None
+        if reset: notice='Goose history changed while paging; the latest page was reloaded.'
+        elif activity_limited: notice='Some Goose activity could not be paired safely within the bounded history scan.'
+        elif page_limited: notice='Some Goose history was omitted to keep this view bounded.'
+        elif len(page_specs)>=GOOSE_STORE_MAX_HISTORY_PAGES and current.get('older') is not None:
+            notice='Older Goose history is limited to five pages.'
+
+        if token is None and request.get('known_version') is not None and request.get('known_version')!=revision:
+            reset=True
+            notice='Goose history changed; the latest persisted page was reloaded.'
+        unchanged=bool(token is None and request.get('known_version')==revision and not reset)
+        if unchanged: messages=[];activities=[]
+        reply=goose_reply_observation(observation,chosen,request.get('known_reply_version'),
+                                      request.get('known_reply_order_key'),latest,store)
+        return dict(messages=messages,activities=activities,activity_limited=activity_limited,
+                    limited=page_limited,history_version=revision,history_reset=reset,
+                    history_notice=notice,history_unchanged=unchanged,
+                    history_page=dict(protocol='cc.history.v1',store_id=store_id,session_id=session_id,
+                                      revision=revision,reset=reset,next_cursor=next_cursor),
+                    reply=reply)
+
+
+def goose_reply_observation(observation,chosen,known_version=None,known_order=None,page=None,store=None):
+    if not chosen: return None
+    if store is None:
+        with GooseSessionStore(observation) as opened:
+            page=page or opened.messages(chosen['session'])
+            return goose_reply_observation(observation,chosen,known_version,known_order,page,opened)
+    if page is None: page=store.messages(chosen['session'])
+    store_id=goose_history_store_id(observation,chosen)
+    version=goose_history_revision(store_id,page['fingerprint'])
+    result=dict(conversation=chosen['id'],session_id=chosen['session'],source_id=store_id,
+                version=version,cursor=None,order_key=None,reply_order_key=None,
+                reset=False,unchanged=False,mtime_ns=0,position=0)
+    rows=[row for row in page['messages'] if row.get('role')=='assistant' and goose_row_visible(row)
+          and goose_chat_text(row)[0].strip()]
+    latest=rows[-1] if rows else None
+    if latest:
+        timestamp=int(latest['created_timestamp']);row_id=int(latest['id'])
+        order=goose_order_key(timestamp,row_id)
+        message_id=latest.get('message_id')
+        result['order_key']=goose_order_key(timestamp,row_id,0)
+        result['reply_order_key']=order
+        if isinstance(message_id,str) and message_id and len(message_id)<=256:
+            result['cursor']=hashlib.sha256(f'goose-reply-v1:{store_id}:{chosen["session"]}:{message_id}'.encode()).hexdigest()
+    result['unchanged']=known_version==version
+    if not result['unchanged'] and known_order:
+        if latest is None or result['reply_order_key'] is None or result['reply_order_key']<known_order:
+            result['reset']=True
+        elif result['reply_order_key']>known_order:
+            previous=store.reply_row(chosen['session'],known_order)
+            previous_text=goose_chat_text(dict(content=previous['content']))[0] if previous and isinstance(previous.get('content'),list) else ''
+            current_text=goose_chat_text(latest)[0]
+            if (previous is None or previous.get('message_id')==latest.get('message_id')
+                    or previous_text and previous_text==current_text):
+                result['reset']=True
+    return result
+
+
+def is_goose_process(base):
+    try:
+        command=(base/'comm').read_text().strip().lower()
+        argv=process_argv(base)
+        return command in ('goose','goose-cli') or bool(argv and os.path.basename(argv[0]).lower() in ('goose','goose-cli'))
+    except (OSError,IndexError):
+        return False
+
+
 def process_kind(base):
     command=(base/'comm').read_text().strip().lower()
-    with (base/'cmdline').open('rb') as source: argv=source.read(8192).decode(errors='replace').split('\0')
-    names=(command,os.path.basename(argv[0]).lower())
-    for kind in ('codex','claude','pi'):
-        if kind in names or kind=='pi' and 'pi-coding-agent' in names: return kind
-    return None
+    argv=process_argv(base)
+    executable=os.path.basename(argv[0]).lower() if argv else ''
+    kind=provider_from_names((command,executable))
+    if kind=='goose':
+        return kind if goose_invocation(argv) else None
+    return kind
 
 
 def foreground_agent(pid):
@@ -66,12 +1078,13 @@ def foreground_agent(pid):
         if ancestor['parent']<=1: return None
         ancestor=process_info(ancestor['parent'])
     else: fail(413,'Foreground ancestry exceeds the discovery bound')
+    import stat
+    terminal=os.stat(pane['base']/'fd/0')
+    if not stat.S_ISCHR(terminal.st_mode): return None
     kind=process_kind(leader['base'])
     if kind: candidate=leader
     else:
-        import stat
-        terminal=os.stat(pane['base']/'fd/0')
-        if not stat.S_ISCHR(terminal.st_mode): return None
+        if is_goose_process(leader['base']): return None
         pending=[leader];visited=set();candidates=[]
         while pending:
             current=pending.pop(0)
@@ -84,18 +1097,24 @@ def foreground_agent(pid):
                 stdin=os.stat(current['base']/'fd/0')
                 if stat.S_ISCHR(stdin.st_mode) and stdin.st_rdev==terminal.st_rdev: candidates.append((current,current_kind))
                 continue  # A CLI's delegated children are not separate pane agents.
+            if is_goose_process(current['base']): return None
             for child in (current['base']/'task'/str(current['pid'])/'children').read_text().split()[:33]:
                 try: child_info=process_info(int(child))
                 except (OSError,ValueError): continue
                 if child_info['parent']==current['pid']: pending.append(child_info)
         if len(candidates)!=1: return None
         candidate,kind=candidates[0]
+    candidate_stdin=os.stat(candidate['base']/'fd/0')
+    if not stat.S_ISCHR(candidate_stdin.st_mode) or candidate_stdin.st_rdev!=terminal.st_rdev: return None
     fresh_pane=process_info(pid);fresh_leader=process_info(leader['pid']);fresh_agent=process_info(candidate['pid'])
     if (fresh_pane['start']!=pane['start'] or fresh_pane['foreground']!=leader['pid']
         or fresh_leader['start']!=leader['start'] or fresh_agent['start']!=candidate['start']
         or fresh_agent['group']!=leader['pid'] or fresh_agent['tty']!=pane['tty']
         or process_kind(fresh_agent['base'])!=kind): return None
-    return pane,leader,candidate,kind
+    mode=goose_invocation(process_argv(candidate['base'])) if kind=='goose' else None
+    fresh_mode=goose_invocation(process_argv(fresh_agent['base'])) if kind=='goose' else None
+    if mode!=fresh_mode: return None
+    return pane,leader,candidate,kind,mode
 
 
 def discover_agents(request):
@@ -128,32 +1147,41 @@ def observe(request):
     if len(info) != 4 or info[2] != '0':
         fail(409, 'Agent pane has exited')
     command = info[1].lower()
-    kind = 'codex' if 'codex' in command else 'claude' if 'claude' in command else 'pi' if command in ('pi', 'pi-coding-agent') else None
+    kind = provider_from_names((command,))
     captured = tmux(request, 'capture-pane', '-p', '-t', target, '-S', '-40')
     text = captured[-48000:]
     identity, agent_base, args, env = None, None, [], {}
     try:
         resolved=foreground_agent(int(info[0]))
         if not resolved: fail(409,'No unique supported agent owns this foreground terminal')
-        pane_process,leader,agent_process,kind=resolved
+        pane_process,leader,agent_process,kind,mode=resolved
         start=pane_process['start'];foreground=leader['pid'];agent_start=agent_process['start'];agent_base=agent_process['base']
         argv=(agent_base/'cmdline').read_bytes().decode(errors='replace').split('\0')
         args = argv
         # Read only allowlisted provider/environment identity metadata. Never return environments.
         for value in (agent_base / 'environ').read_bytes().decode(errors='replace').split('\0'):
             key, _, val = value.partition('=')
-            if key in ('VIRTUAL_ENV','CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'CC_LAUNCH_ID', 'PI_CODING_AGENT_DIR', 'PI_CODING_AGENT_SESSION_DIR', 'CC_RESTART_ID'):
+            if key in ('VIRTUAL_ENV', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'CC_LAUNCH_ID', 'PI_CODING_AGENT_DIR', 'PI_CODING_AGENT_SESSION_DIR', 'CC_RESTART_ID',
+                       'GOOSE_PATH_ROOT', 'XDG_DATA_HOME', 'APPDATA', 'HOME'):
                 env[key] = val
         boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
         basis=f'{boot}:{info[0]}:{start}:{foreground}:{agent_start}:{kind}'
         if agent_process['pid']!=foreground: basis+=f":wrapped:{agent_process['pid']}:{leader['start']}"
+        storage_root=None
+        storage_identity=None
+        if kind=='goose':
+            storage_root=str(goose_data_dir(env))
+            storage_identity=goose_data_identity(storage_root)
+            basis+=f':goose-mode:{mode}:storage:{storage_identity}'
         identity = hashlib.sha256(basis.encode()).hexdigest()
         cwd = os.path.realpath(agent_base / 'cwd')
     except (OSError, ValueError, IndexError):
         if not kind: fail(409,'No process-backed agent association is available')
         cwd = tmux(request, 'display-message', '-p', '-t', target, '#{pane_current_path}').rstrip('\n')
     return dict(target=target, socket=request.get("socket"), kind=kind, identity=identity, base=agent_base, args=args,
-                env=env, cwd=cwd, context=text, visible=tmux(request, 'capture-pane', '-p', '-t', target, '-S', '0'), in_mode=info[3] != '0',
+                env=env, storage_root=storage_root if kind=='goose' else None,
+                storage_identity=storage_identity if kind=='goose' else None,
+                cwd=cwd, context=text, visible=tmux(request, 'capture-pane', '-p', '-t', target, '-S', '0'), in_mode=info[3] != '0',
                 screen=hashlib.sha256(captured.encode()).hexdigest())
 
 def approval_menu(observation):
@@ -362,6 +1390,8 @@ def head_records(path):
         return
 
 def metadata(path, kind):
+    require_provider(kind)
+    require_capability(kind, 'project_history')
     for record in head_records(path):
         if kind == 'pi' and record.get('type') == 'session':
             version = record.get('version', 1)
@@ -519,6 +1549,7 @@ def claude_tmux_matches(recorded, target, socket=None):
 
 def process_sessions(observation, home, follow_continuations=True):
     """Provider state must match live PID/start identity, never cwd alone."""
+    require_provider(observation.get('kind'))
     base = observation.get('base')
     if base is None:
         return set()
@@ -660,6 +1691,7 @@ def pi_pending_session(observation):
 
 
 def pi_conversations(observation):
+    if require_provider(observation.get('kind')) != 'pi': fail(400, 'Unsupported agent provider')
     import itertools
     home = pi_home(observation)
     cwd = observation['cwd']
@@ -868,6 +1900,12 @@ def message_order(content):
     if not isinstance(content,list): return -1
     return next((index for index,block in enumerate(content) if isinstance(block,dict) and block.get('type') in ('text','input_text','output_text') and isinstance(block.get('text'),str) and block['text'].strip()),-1)
 
+def legacy_order_key(position, order=0):
+    # Fixed-width ASCII keeps file offsets sortable without making the browser
+    # interpret a display ID as a number. Native providers supply their own
+    # lexically sortable key under the same API contract.
+    return f'{position:020d}:{max(0, order):06d}'
+
 
 def activity_text(value, limit=12000):
     if isinstance(value, str): return value[:limit]
@@ -879,9 +1917,12 @@ def activity_text(value, limit=12000):
 
 def history_activities(records, kind, floor=0):
     """Read only provider-visible blocks; never signatures, encrypted reasoning or hidden context."""
+    require_provider(kind)
+    require_capability(kind, 'project_history')
     entries, calls = [], {}
     def add(offset, order, timestamp, category, title, text='', call_id=None):
-        entry = dict(id=f'activity:{offset}:{order}', position=offset, order=order, timestamp=timestamp,
+        entry = dict(id=f'activity:{offset}:{order}', position=offset, order=order,
+                     order_key=legacy_order_key(offset, order), timestamp=timestamp,
                      kind=category, title=title[:160], text=text[:12000], truncated=len(text)>12000, status='recorded' if category=='thinking' else 'pending')
         entries.append(entry)
         if isinstance(call_id, str) and call_id and len(call_id)<=256: calls[call_id]=entry
@@ -1002,20 +2043,34 @@ def pi_history(path, before=None, known_branch=None, active_leaf=False, include_
         if not isinstance(message,dict) or message.get('role') not in ('user','assistant'): continue
         text=message_text(message.get('content'))
         if not text.strip(): continue
-        messages.append(dict(id=str(offset),cursor=hashlib.sha256(f'{offset}:{text}'.encode()).hexdigest(),role=message['role'],input_hash=input_hash(text) if message['role']=='user' else None,
-                             text=text[:16000],truncated=len(text)>16000,order=message_order(message.get('content')),timestamp=record.get('timestamp','')))
+        order=message_order(message.get('content'))
+        messages.append(dict(id=str(offset),legacy_position=offset,cursor=hashlib.sha256(f'{offset}:{text}'.encode()).hexdigest(),role=message['role'],input_hash=input_hash(text) if message['role']=='user' else None,
+                             text=text[:16000],truncated=len(text)>16000,order=order,order_key=legacy_order_key(offset,order),reply_order_key=legacy_order_key(offset),timestamp=record.get('timestamp','')))
     page=messages[-100:];budget=512000
     for index,message in enumerate(page):
         original=len(message['text']);allowance=budget//(len(page)-index);message['text']=message['text'][:allowance]
         message['truncated']=message['truncated'] or original>allowance;budget-=len(message['text'])
     notice='Showing the latest persisted pi branch; older ancestry is outside the bounded history window.' if cursor is not None or start or len(entries)>=50000 else None
     activity_records=[(offset,record) for offset,record in selected if before is None or offset<int(before)]
-    activities, activity_limited = history_activities(activity_records, 'pi', int(page[0]['id']) if len(messages)>100 else 0) if include_activity else ([],False)
-    return dict(messages=page,commands=commands[-100:],activities=activities,activity_limited=activity_limited,older_cursor=int(page[0]['id']) if len(messages)>100 else (activities[0]['position'] if activity_limited and not page else None),history_branch=branch,
+    activities, activity_limited = history_activities(activity_records, 'pi', page[0].get('legacy_position',0) if len(messages)>100 else 0) if include_activity else ([],False)
+    return dict(messages=page,commands=commands[-100:],activities=activities,activity_limited=activity_limited,older_cursor=page[0].get('legacy_position',0) if len(messages)>100 else (activities[0]['position'] if activity_limited and not page else None),history_branch=branch,
                 history_reset=reset,history_notice=notice,limited=bool(notice or len(messages)>100))
 
 def conversations(observation):
+    require_provider(observation.get('kind'))
+    if not capability_available(observation['kind'], 'project_history'):
+        return []
     if observation['kind'] == 'pi': return pi_conversations(observation)
+    if observation['kind'] == 'goose':
+        try:
+            store=goose_store_sessions(observation)
+            return [dict(id=row['id'],session=row['session'],name=row.get('name'),
+                         timestamp=row.get('updated_at'),created_at=row.get('created_at'),
+                         updated_at=row.get('updated_at'),archived=row.get('archived',False),
+                         linked=False) for row in store['conversations']]
+        except Failure as error:
+            observation['history_error']=error.message
+            return []
     kind, cwd, env = observation['kind'], observation['cwd'], observation['env']
     home = Path(env.get('CODEX_HOME', Path.home() / '.codex') if kind == 'codex' else env.get('CLAUDE_CONFIG_DIR', Path.home() / '.claude'))
     paths, linked = [], set()
@@ -1081,6 +2136,8 @@ def conversations(observation):
     return candidates[:20]
 
 def provider_home(observation):
+    require_provider(observation.get('kind'))
+    require_capability(observation['kind'], 'project_history')
     if observation['kind'] == 'pi': return pi_home(observation)
     env = observation['env']
     return Path(env.get('CODEX_HOME', Path.home() / '.codex') if observation['kind'] == 'codex'
@@ -1186,6 +2243,9 @@ def claude_log_activity(path, session, now):
 
 
 def provider_activity(observation, candidates=None):
+    require_provider(observation.get('kind'))
+    if not capability_available(observation['kind'], 'verified_phase'):
+        return state_result('unknown', 'none', capability_reason(observation['kind'], 'verified_phase'))
     menu = approval_menu(observation)
     if menu:
         return state_result('approval', 'terminal_prompt', 'Recognized live approval menu; explicit human decision required', int(time.time()), menu['id'])
@@ -1263,6 +2323,8 @@ def message_text(content):
     return '\n'.join(c.get('text', '') for c in content if isinstance(c, dict) and c.get('type') in ('text', 'input_text', 'output_text') and isinstance(c.get('text'), str))
 
 def history(path, kind, before=None, known_branch=None, active_leaf=False, include_activity=True):
+    require_provider(kind)
+    require_capability(kind, 'project_history')
     if kind == 'pi': return pi_history(path,before,known_branch,active_leaf,include_activity)
     # Read only a tail/page, never a growing multi-GB transcript into memory.
     with open(path, 'rb') as source:
@@ -1296,7 +2358,7 @@ def history(path, kind, before=None, known_branch=None, active_leaf=False, inclu
                 role = 'user' if payload['type'] == 'user_message' else 'assistant'
                 text = payload.get('message', '')
                 if isinstance(text, str) and text:
-                    events.append((offset, dict(id=str(offset), cursor=hashlib.sha256(f'{offset}:{text}'.encode()).hexdigest(), role=role, input_hash=input_hash(text) if role=='user' else None, text=text[:16000], truncated=len(text)>16000, timestamp=record.get('timestamp', ''))))
+                    events.append((offset, dict(id=str(offset), legacy_position=offset, cursor=hashlib.sha256(f'{offset}:{text}'.encode()).hexdigest(), role=role, input_hash=input_hash(text) if role=='user' else None, text=text[:16000], truncated=len(text)>16000, order_key=legacy_order_key(offset), reply_order_key=legacy_order_key(offset), timestamp=record.get('timestamp', ''))))
                 continue
             else: continue
         else:
@@ -1305,7 +2367,8 @@ def history(path, kind, before=None, known_branch=None, active_leaf=False, inclu
             if not isinstance(payload, dict): continue
             role, text = payload.get('role'), message_text(payload.get('content'))
         if role not in ('user', 'assistant') or not text.strip(): continue
-        messages.append((offset, dict(id=str(offset), cursor=hashlib.sha256(f'{offset}:{text}'.encode()).hexdigest(), role=role, input_hash=native_input_hash(text,kind) if role=='user' else None, text=text[:16000], truncated=len(text)>16000, order=message_order(payload.get('content')), timestamp=record.get('timestamp', ''))))
+        order=message_order(payload.get('content'))
+        messages.append((offset, dict(id=str(offset), legacy_position=offset, cursor=hashlib.sha256(f'{offset}:{text}'.encode()).hexdigest(), role=role, input_hash=native_input_hash(text,kind) if role=='user' else None, text=text[:16000], truncated=len(text)>16000, order=order, order_key=legacy_order_key(offset,order), reply_order_key=legacy_order_key(offset), timestamp=record.get('timestamp', ''))))
     if not messages: messages = events
     page = messages[-100:]
     budget = 512000
@@ -1327,18 +2390,63 @@ def transcript_version(chosen):
     if 'leaf_id' in chosen: version=hashlib.sha256((version+':'+json.dumps(chosen['leaf_id'])).encode()).hexdigest()
     return info, version
 
-def reply_observation(chosen, kind, known_version=None, page=None):
+def history_store_id(chosen):
+    info=os.stat(chosen['path'])
+    return hashlib.sha256(f'file-v1:{info.st_dev}:{info.st_ino}'.encode()).hexdigest()
+
+def encode_history_cursor(kind, chosen, revision, before):
+    payload=dict(v=1,provider=kind,store=history_store_id(chosen),conversation=chosen['id'],
+                 revision=revision,before=str(before),branch=chosen.get('leaf_id'))
+    raw=json.dumps(payload,separators=(',',':'),sort_keys=True).encode()
+    return 'cc-history-v1.'+base64.urlsafe_b64encode(raw).decode().rstrip('=')
+
+def decode_history_cursor(token, kind, chosen, revision):
+    if not isinstance(token,str) or len(token)>1024 or not token.startswith('cc-history-v1.'):
+        fail(400,'Invalid history cursor')
+    encoded=token[len('cc-history-v1.'):]
+    try:
+        raw=base64.b64decode(encoded+'='*((-len(encoded))%4),altchars=b'-_',validate=True)
+        payload=json.loads(raw)
+    except (ValueError,UnicodeError):
+        fail(400,'Invalid history cursor')
+    if not isinstance(payload,dict) or set(payload)!={'v','provider','store','conversation','revision','before','branch'} or payload.get('v')!=1:
+        fail(400,'Invalid history cursor')
+    if (payload.get('provider')!=kind or payload.get('store')!=history_store_id(chosen)
+        or payload.get('conversation')!=chosen.get('id')):
+        fail(409,'History cursor belongs to another source; reload the latest history')
+    if payload.get('branch')!=chosen.get('leaf_id') or payload.get('revision')!=revision:
+        return None,True
+    before=payload.get('before')
+    if not isinstance(before,str) or not before.isascii() or not before.isdecimal() or (len(before)>1 and before.startswith('0')):
+        fail(400,'Invalid history cursor')
+    position=int(before)
+    if position>os.stat(chosen['path']).st_size:
+        return None,True
+    return position,False
+
+def reply_observation(chosen, kind, known_version=None, known_order=None, page=None):
+    require_provider(kind)
+    require_capability(kind, 'project_history')
     if not chosen: return None
     info, version = transcript_version(chosen)
-    result = dict(conversation=chosen['id'], version=version, cursor=None, unchanged=False, mtime_ns=info.st_mtime_ns, position=0)
+    result = dict(conversation=chosen['id'], session_id=chosen.get('session',chosen['id']),
+                  source_id=history_store_id(chosen), version=version, cursor=None, order_key=None,
+                  reply_order_key=None, reset=False, unchanged=False, mtime_ns=info.st_mtime_ns, position=0)
     if version == known_version:
         result['unchanged'] = True
         return result
     page = history(chosen['path'], kind, active_leaf=chosen.get('leaf_id',False), include_activity=False) if page is None else page
     latest = next((m for m in reversed(page['messages']) if m['role'] == 'assistant'), None)
     if latest:
-        result['position'] = int(latest['id'])
+        result['position'] = latest.get('legacy_position',0)
+        result['order_key'] = latest.get('order_key')
+        result['reply_order_key'] = latest.get('reply_order_key')
         result['cursor'] = hashlib.sha256(f"{info.st_dev}:{info.st_ino}:{latest['cursor']}".encode()).hexdigest()
+    changed = known_version is not None and known_version != version
+    moved_back = (known_order is not None and latest is not None
+                  and isinstance(latest.get('reply_order_key'), str)
+                  and latest['reply_order_key'] < known_order)
+    result['reset']=bool(page.get('history_reset') or changed and (latest is None or moved_back))
     return result
 
 def project_directory(value):
@@ -1370,7 +2478,8 @@ def python_venv(project, value):
     except (OSError,ValueError,RuntimeError): fail(400,'Python venv is unavailable; check its directory')
 
 def launch_executable(kind):
-    if kind not in ('codex', 'claude', 'pi'): fail(400, 'Choose Codex, Claude or pi')
+    require_capability(kind, 'launch')
+    require_provider(kind)
     search = os.environ.get('PATH', '') + os.pathsep + str(Path.home()/'.local/bin') + os.pathsep + str(Path.home()/'.cargo/bin') + ':/usr/local/bin'
     executable=shutil.which(kind, path=search)
     if not executable: fail(404, f'{kind} is not installed on this machine or is not executable')
@@ -1379,10 +2488,14 @@ def launch_executable(kind):
     return executable, f'{info.st_dev}:{info.st_ino}:{info.st_size}:{info.st_mtime_ns}', search
 
 def launch_candidates(path, kind):
+    require_capability(kind, 'launch')
+    require_provider(kind)
     observation=dict(kind=kind,cwd=path,env={k:os.environ[k] for k in ('CODEX_HOME','CLAUDE_CONFIG_DIR','PI_CODING_AGENT_DIR','PI_CODING_AGENT_SESSION_DIR') if k in os.environ},base=None,args=[])
     return conversations(observation)
 
 def active_launch_sessions(request, kind):
+    require_capability(kind, 'launch')
+    require_provider(kind)
     # Process evidence only. An unrelated project transcript is never "active".
     active=set()
     try:
@@ -1397,7 +2510,7 @@ def active_launch_sessions(request, kind):
             if fields[4]=='0' and metadata.get('provider')==kind and metadata.get('pane')==fields[2] and metadata.get('conversation'):
                 active.add(metadata['conversation'])
         except (ValueError,AttributeError): pass
-        if kind not in fields[3].lower(): continue
+        if provider_from_names((fields[3].lower(),)) != kind: continue
         seen.add(fields[2])
         if len(seen)>64: break
         try:
@@ -1410,6 +2523,8 @@ def active_launch_sessions(request, kind):
     return active
 
 def launch_title(candidate, kind):
+    require_capability(kind, 'launch')
+    require_provider(kind)
     for record in head_records(candidate['path']):
         if record.get('isMeta') or record.get('isSidechain') or (kind=='claude' and claude_internal_user(record)): continue
         if kind=='codex':
@@ -1473,6 +2588,8 @@ def launch_label(value, limit, label):
     return value or None
 
 def launch_options(request):
+    require_capability(request.get('provider'), 'launch')
+    require_provider(request.get('provider'))
     target_session,destination_identity=launch_destination(request)
     model=launch_model(request.get('model'))
     window_name=launch_label(request.get('window_name'),120,'Window name')
@@ -1517,9 +2634,10 @@ def launch_status(request):
         return dict(found=False,launch_id=identifier)
     if len(matches)!=1:fail(409,'Launch identity is ambiguous; inspect its session/window')
     fields,metadata=matches[0];row=fields[:5];session_id=row[0]
-    kind=metadata['provider']
+    kind=require_provider(metadata.get('provider'))
+    require_capability(kind, 'launch')
     association={}
-    if metadata.get('ticket') and row[3]=='0' and kind in row[4].lower():
+    if metadata.get('ticket') and row[3]=='0' and provider_from_names((row[4].lower(),)) == kind:
         try:
             observed=observe(dict(request,session=row[0],window=row[1],pane=row[2]))
             if observed.get('identity') and observed['env'].get('CC_LAUNCH_ID')==identifier:
@@ -1531,7 +2649,7 @@ def launch_status(request):
     if metadata.get('conversation'):association.setdefault('conversation',metadata['conversation'])
     return dict(found=True,launch_id=identifier,session=row[0],window=row[1],pane=row[2],
                 session_name=fields[5],destination=metadata.get('destination','session'),project=metadata['project'],provider=kind,model=metadata.get('model'),python_venv=metadata.get('python_venv'),approval_policy=metadata.get('approval_policy'),
-                running=row[3]=='0' and kind in row[4].lower(),exited=row[3]=='1',
+                running=row[3]=='0' and provider_from_names((row[4].lower(),)) == kind,exited=row[3]=='1',
                 context=tmux(request,'capture-pane','-p','-t',row[2],'-S','0')[-12000:],**association)
 
 def respawn_launch(request, pane, directory, environment, command):
@@ -1565,6 +2683,8 @@ def respawn_launch(request, pane, directory, environment, command):
 
 def launch_agent(request):
     # Validate everything before creating a new, uniquely named session.
+    require_capability(request.get('provider'), 'launch')
+    require_provider(request.get('provider'))
     identifier=request.get('launch_id','')
     existing=launch_status(request)
     if existing['found']: fail(409,'This launch already exists; check its status instead of retrying')
@@ -1626,6 +2746,8 @@ def launch_agent(request):
     return launch_status(request)
 
 def restart_plan(request, observation):
+    require_capability(observation.get('kind'), 'restart')
+    require_provider(observation.get('kind'))
     if not observation.get('identity') or observation['identity'] != request.get('identity'):
         fail(409, 'Agent process changed; no restart was attempted')
     linked = [c for c in conversations(observation) if c.get('linked')]
@@ -1696,15 +2818,20 @@ def restart_status(request):
 
 
 def execute(request):
-    if request.get('action') == 'discover_agents': return discover_agents(request)
-    if request.get('action') == 'launch_options': return launch_options(request)
-    if request.get('action') == 'launch_status': return launch_status(request)
-    if request.get('action') == 'launch': return launch_agent(request)
-    if request.get('action') == 'restart_status': return restart_status(request)
+    action=request.get('action')
+    if action in ('launch_options', 'launch'):
+        require_capability(request.get('provider'), 'launch')
+        require_provider(request.get('provider'))
+    if action == 'discover_agents': return discover_agents(request)
+    if action == 'launch_options': return launch_options(request)
+    if action == 'launch_status': return launch_status(request)
+    if action == 'launch': return launch_agent(request)
+    if action == 'restart_status': return restart_status(request)
     observation = observe(request)
     if request.get('action') == 'restart_prepare': return restart_plan(request, observation)
     if request.get('action') == 'restart_agent': return restart_agent(request, observation)
     if request.get('action') == 'close_agent':
+        require_capability(observation['kind'], 'close_agent')
         if not observation.get('identity') or observation['identity'] != request.get('identity'):
             fail(409,'Agent process changed; no window was closed')
         try:
@@ -1717,6 +2844,7 @@ def execute(request):
         exec(request['_question_code'],namespace)
         return namespace['answer_question'](request,observation)
     if request.get('action') == 'approval':
+        require_capability(observation['kind'], 'native_approval')
         menu = approval_menu(observation)
         if (not menu or observation['identity'] != request.get('identity')
                 or observation['screen'] != request.get('screen') or menu['id'] != request.get('approval_id')):
@@ -1737,13 +2865,19 @@ def execute(request):
             fail(502, 'Decision delivery uncertain. Check the agent before responding again.')
         return dict(submitted=True)
     if request.get('action') == 'status':
-        candidates = conversations(observation)
+        candidates=(conversations(observation) if observation['kind']!='goose' or request.get('conversation') else [])
         linked = [c for c in candidates if c['linked']]
         chosen = linked[0] if len(linked) == 1 else next((c for c in candidates if c['id'] == request.get('conversation')), None)
-        if not chosen and len(candidates) == 1 and not observation['env'].get('CC_LAUNCH_ID'): chosen = candidates[0]
-        return dict(instance=observation['identity'], context=observation['context'],
-                    reply=reply_observation(chosen, observation['kind'], request.get('known_reply_version')),
+        if observation['kind']!='goose' and not chosen and len(candidates) == 1 and not observation['env'].get('CC_LAUNCH_ID'): chosen = candidates[0]
+        reply=(goose_reply_observation(observation,chosen,request.get('known_reply_version'),request.get('known_reply_order_key'))
+               if observation['kind']=='goose' and chosen else
+               reply_observation(chosen, observation['kind'], request.get('known_reply_version'), request.get('known_reply_order_key'))
+               if capability_available(observation['kind'], 'project_history') else None)
+        result=dict(instance=observation['identity'], provider=observation['kind'], context=observation['context'],
+                    capabilities=capability_payload(observation['kind']),reply=reply,
                     activity=provider_activity(observation, candidates),background_tasks=observed_background_tasks(observation,chosen if len(linked)==1 and chosen is linked[0] else None))
+        if observation.get('history_error'): result['history_unavailable']=observation['history_error']
+        return result
     if request.get('action') == 'outbox_status':
         if request.get('identity') and observation['identity'] != request['identity']:
             fail(409, 'Agent process changed; queued messages were not sent')
@@ -1751,22 +2885,29 @@ def execute(request):
         linked=[candidate for candidate in candidates if candidate.get('linked')]
         chosen=linked[0] if len(linked)==1 else None
         result=dict(instance=observation['identity'], screen=observation['screen'], context=observation['context'],
+                    capabilities=capability_payload(observation['kind']),
                     activity=provider_activity(observation,candidates), log=None, users=[], pending_pi_session=None,
                     send_available=bool(observation['identity']) and not observation['in_mode'] and not approval_menu(observation)
+                        and capability_available(observation['kind'], 'ordinary_message_submission')
+                        and capability_available(observation['kind'], 'acceptance_confirmation')
                         and not native_input_dialog(observation))
         state=active_message_state(observation)
         result['input_guard']=message_input_guard(observation,state) if state else None
+        if not result['send_available']:
+            result['send_reason']=capability_reason(observation['kind'], 'ordinary_message_submission')
         if chosen:
             info=os.stat(chosen['path'])
             result['log']=dict(conversation=chosen['id'],device=info.st_dev,inode=info.st_ino,size=info.st_size)
             page=history(chosen['path'],observation['kind'],active_leaf=chosen.get('leaf_id',False),include_activity=False)
-            result['users']=[dict(position=int(message['id']),digest=message.get('input_hash')) for message in page['messages'] if message['role']=='user' and message.get('input_hash')]
+            result['users']=[dict(position=message['legacy_position'],digest=message.get('input_hash')) for message in page['messages'] if message['role']=='user' and message.get('input_hash') and type(message.get('legacy_position')) is int]
             result['commands']=page.get('commands',[])
             if observation['kind']=='pi': result['pi_session']=chosen['session']
         else:
             result['pending_pi_session']=pi_pending_session(observation)
         return result
     if request.get('action') == 'send':
+        require_capability(observation['kind'], 'ordinary_message_submission')
+        require_capability(observation['kind'], 'acceptance_confirmation')
         if native_input_dialog(observation): fail(409,'The native CLI is waiting for input in a dialog. Answer it in the terminal before sending a message.')
         if not observation['identity'] or observation['identity'] != request.get('identity'):
             fail(409, 'Agent process changed; refresh before sending')
@@ -1825,12 +2966,18 @@ def execute(request):
         fail(409, 'Conversation is no longer available for this project')
     result = dict(instance=observation['identity'], screen=observation['screen'], context=observation['context'],
                   project=observation['cwd'], provider=observation['kind'], selected=selected,
+                  capabilities=capability_payload(observation['kind']),
                   approval=approval_menu(observation), input_request=input_question(observation),
                   association='process' if chosen and chosen['linked'] else 'project' if chosen else 'none',
                   conversations=[{k:v for k,v in c.items() if k != 'path'} for c in candidates],
                   activity=provider_activity(observation, candidates),
                   messages=[], older_cursor=None,
-                  send_available=bool(observation['identity']) and not observation['in_mode'])
+                  send_available=bool(observation['identity']) and not observation['in_mode']
+                      and capability_available(observation['kind'], 'ordinary_message_submission')
+                      and capability_available(observation['kind'], 'acceptance_confirmation'))
+    if observation.get('history_error'): result['history_unavailable']=observation['history_error']
+    if not result['send_available']:
+        result['send_reason']=capability_reason(observation['kind'], 'ordinary_message_submission')
     if result['input_request'] and result['input_request']['supported']:
         question=result['input_request'];anchor=question_request_id(observation,question,candidates)
         if anchor:
@@ -1842,7 +2989,7 @@ def execute(request):
             question['reason']='The pending native question call could not be verified; answer in the terminal.'
         try: result['input_request']['text_max_bytes']=min(512,max(0,int(tmux(request,'display-message','-p','-t',observation['target'],'#{pane_width}').strip())-12))
         except (Failure,ValueError):result['input_request']['text_max_bytes']=0
-    if result['input_request'] or result['activity']['source']=='claude_input':
+    if result['input_request'] or result['activity'].get('source')=='claude_input':
         result['send_available']=False
         result['send_reason']='Claude is waiting for an answer in a native dialog. Respond in the terminal.'
     if observation['kind']=='pi' and (pi_dialog(observation) or result['activity']['state']=='approval'):
@@ -1850,24 +2997,45 @@ def execute(request):
         result['send_reason']='Pi is waiting for input in a dialog. Answer it in the terminal before sending a message.'
     result['background_tasks']=observed_background_tasks(observation,chosen)
     if chosen:
-        info, version = transcript_version(chosen)
-        prefix = {'claude':'claude-visible-v3:', 'codex':'codex-visible-v2:'}.get(observation['kind'], '')
-        history_version = prefix + version
-        result['history_version'] = history_version
-        if request.get('before') is None and request.get('known_version') == history_version:
-            result['history_unchanged'] = True
+        if observation['kind']=='goose':
+            try:
+                result.update(goose_history_page(observation,chosen,request))
+            except Failure as error:
+                result.update(history_unavailable=error.message,messages=[],activities=[],history_reset=True,
+                              history_notice=error.message,
+                              history_page=dict(protocol='cc.history.v1',store_id=goose_history_store_id(observation,chosen),
+                                                session_id=chosen['session'],revision='',reset=True,next_cursor=None))
         else:
-            result.update(history(chosen['path'], observation['kind'], request.get('before'), request.get('known_branch'), chosen.get('leaf_id',False)))
-        if (observation['kind']=='codex' and isinstance(request.get('known_version'), str)
-            and not request['known_version'].startswith(prefix)):
-            # A filter change must also discard older cached pages in open clients.
-            result['history_reset'] = True
-            result['history_notice'] = 'Conversation display updated to exclude harness-generated context.'
-        if request.get('before') is None and chosen.get('linked') and not result.get('history_unchanged'):
-            result['_outbox_observation']=dict(log=dict(conversation=chosen['id'],device=info.st_dev,inode=info.st_ino,size=info.st_size),users=[dict(position=int(message['id']),digest=message.get('input_hash')) for message in result.get('messages',[]) if message['role']=='user' and message.get('input_hash')])
-            if observation['kind']=='pi': result['_outbox_observation']['pi_session']=chosen['session']
-        if request.get('before') is None:
-            result['reply'] = reply_observation(chosen, observation['kind'], request.get('known_reply_version'), None if result.get('history_unchanged') else result)
+            info, version = transcript_version(chosen)
+            prefix = {'claude':'claude-visible-v3:', 'codex':'codex-visible-v2:'}.get(observation['kind'], '')
+            history_version = prefix + version
+            result['history_version'] = history_version
+            history_before=request.get('before')
+            cursor_reset=False
+            if request.get('history_cursor') is not None:
+                history_before,cursor_reset=decode_history_cursor(request['history_cursor'],observation['kind'],chosen,history_version)
+            known_branch=None if cursor_reset else request.get('known_branch')
+            if history_before is None and not cursor_reset and request.get('known_version') == history_version:
+                result['history_unchanged'] = True
+            else:
+                result.update(history(chosen['path'], observation['kind'], history_before, known_branch, chosen.get('leaf_id',False)))
+            if (observation['kind']=='codex' and isinstance(request.get('known_version'), str)
+                and not request['known_version'].startswith(prefix)):
+                result['history_reset'] = True
+                result['history_notice'] = 'Conversation display updated to exclude harness-generated context.'
+            reset=cursor_reset or bool(result.get('history_reset'))
+            if cursor_reset:
+                result['history_reset']=True
+                result['history_notice']='History changed while paging; the latest page was reloaded.'
+            older=result.get('older_cursor')
+            result['history_page']=dict(protocol='cc.history.v1',store_id=history_store_id(chosen),
+                                        session_id=chosen.get('session',chosen['id']),revision=history_version,
+                                        reset=reset,next_cursor=encode_history_cursor(observation['kind'],chosen,history_version,older) if older is not None and not reset else None)
+            if history_before is None and chosen.get('linked') and not result.get('history_unchanged'):
+                result['_outbox_observation']=dict(log=dict(conversation=chosen['id'],device=info.st_dev,inode=info.st_ino,size=info.st_size),users=[dict(position=message['legacy_position'],digest=message.get('input_hash')) for message in result.get('messages',[]) if message['role']=='user' and message.get('input_hash') and type(message.get('legacy_position')) is int])
+                if observation['kind']=='pi': result['_outbox_observation']['pi_session']=chosen['session']
+            if history_before is None:
+                result['reply'] = reply_observation(chosen, observation['kind'], request.get('known_reply_version'), request.get('known_reply_order_key'), None if result.get('history_unchanged') else result)
     return result
 
 if __name__ == '__main__':

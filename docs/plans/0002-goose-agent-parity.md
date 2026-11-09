@@ -1,19 +1,19 @@
 # Plan 0002: AAIF Goose support in Agents
 
-Status: Proposed; research and execution-tracking package prepared, feature implementation not started or authorized.
+Status: Implementation authorized 2026-11-06; native observation-first direction. Feature implementation in progress under task dependencies; external producer/approval gates remain blocked.
 Research date: 2026-11-06.
 Research: [Task 0022](../tasks/done/0022-goose-agent-parity-research.md). Tracking preparation: [Task 0023](../tasks/done/0023-goose-execution-tracking.md).
-Next gate: [Task 0024: scope/authorization](../tasks/pending/0024-goose-implementation-scope.md). Decision: [ADR-0002](../decisions/0002-goose-integration-direction.md) (Proposed).
+Current task: [Task 0032: Goose Close agent](../tasks/current/0032-goose-close-agent.md). Direction: [ADR-0002](../decisions/0002-goose-integration-direction.md) (Accepted for the recorded CC-owned native implementation scope; conditional gates remain).
 
 ## Execution tracking and handoff
 
 ### Start here / current checkpoint
 
-- **No feature implementation has started.** Research 0022 is done; documentation preparation 0023 is separate from the execution records below.
-- **Next action:** use task 0024 to obtain/record the actual scope decision. The user's request to follow ledger conventions authorizes this tracking package, not a native/ACP choice, installs or live actions. If a later explicit implementation request already supplies scope, record that direction rather than asking for the same approval again.
-- All **26 execution records are unclaimed: 24 pending, 2 externally blocked**. Pending means planned, **not ready/authorized**; a task is eligible only when its applicable authorization/accepted decisions and prerequisite acceptance evidence are satisfied. Blocked records 0035/0046 identify concrete external dependencies and owners/actions.
+- **Scope decision recorded:** the user's 2026-11-06 request authorizes native Goose support in CC, observation first, in the execution task dependency order. See [ADR-0002](../decisions/0002-goose-integration-direction.md) and completed [Task 0024](../tasks/done/0024-goose-implementation-scope.md). CC-owned code and synthetic fixtures are authorized; external producer/approval and live-operation gates are not waived.
+- **Current action:** tasks 0024–0031 are complete; task 0032 is current. Remaining tasks require their prerequisite acceptance evidence and any task-specific accepted decisions. Blocked records 0035/0046 identify concrete external dependencies.
+- All **18 remaining execution records: 1 current, 15 pending, 2 externally blocked**. Tasks 0024–0031 are complete and are no longer pending/current.
 - Outcomes are deliberately separate: [Milestone 0002: limited native observation](../milestones/0002-goose-native-observation.md) and [Milestone 0003: complete native parity](../milestones/0003-goose-full-agent-parity.md), both Proposed/not started.
-- Latest checkpoint/handoff: [execution package handoff](../notes/2026-11-06-goose-execution-package.md). It records actual working-tree state and the immediate next action. This must be updated or replaced by the next dated note when work pauses.
+- Latest checkpoint/handoff: [Goose Close agent](../notes/2026-11-09-goose-close-agent.md). It records the B4-close implementation and the current tmux-socket verification blocker.
 
 ### Source of truth and task tracker
 
@@ -21,15 +21,14 @@ Next gate: [Task 0024: scope/authorization](../tasks/pending/0024-goose-implemen
 
 | Task | Plan step(s) | State | Owner | Prerequisite task IDs |
 |---|---|---|---|---|
-| [0024: Resolve Goose implementation scope and authorization](../tasks/pending/0024-goose-implementation-scope.md) | Gate | Pending | Unclaimed | — |
-| [0025: Make agent provider dispatch explicit](../tasks/pending/0025-goose-provider-dispatch.md) | A1 | Pending | Unclaimed | 0024 |
-| [0026: Add independent agent capabilities and action guards](../tasks/pending/0026-goose-capability-guards.md) | A2 | Pending | Unclaimed | 0025 |
-| [0027: Separate history ordering, revisions and read cursors](../tasks/pending/0027-goose-history-cursor-contract.md) | A3 | Pending | Unclaimed | 0026 |
-| [0028: Discover interactive Goose and resolve its storage roots](../tasks/pending/0028-goose-process-discovery.md) | B1 | Pending | Unclaimed | 0026 |
-| [0029: Read the Goose session store safely](../tasks/pending/0029-goose-readonly-session-store.md) | B2 | Pending | Unclaimed | 0027, 0028 |
-| [0030: Project Goose chat history and inline activity](../tasks/pending/0030-goose-history-activity-projection.md) | B3 | Pending | Unclaimed | 0029 |
-| [0031: Present honest Goose observation, cards and read state](../tasks/pending/0031-goose-observation-ui.md) | B4-observation | Pending | Unclaimed | 0030, 0028 |
-| [0032: Enable reviewed Close agent for Goose](../tasks/pending/0032-goose-close-agent.md) | B4-close | Pending | Unclaimed | 0031 |
+| [0025: Make agent provider dispatch explicit](../tasks/done/0025-goose-provider-dispatch.md) | A1 | Done | Codex | 0024 (done) |
+| [0026: Add independent agent capabilities and action guards](../tasks/done/0026-goose-capability-guards.md) | A2 | Done | Codex | 0025 (done) |
+| [0027: Separate history ordering, revisions and read cursors](../tasks/done/0027-goose-history-cursor-contract.md) | A3 | Done | Codex | 0026 (done) |
+| [0028: Discover interactive Goose and resolve its storage roots](../tasks/done/0028-goose-process-discovery.md) | B1 | Done | Codex | 0026 (done) |
+| [0029: Read the Goose session store safely](../tasks/done/0029-goose-readonly-session-store.md) | B2 | Done | Codex | 0027, 0028 (done) |
+| [0030: Project Goose chat history and inline activity](../tasks/done/0030-goose-history-activity-projection.md) | B3 | Done | Codex | 0029 (done) |
+| [0031: Present honest Goose observation, cards and read state](../tasks/done/0031-goose-observation-ui.md) | B4-observation | Done | Codex | 0030, 0028 (done) |
+| [0032: Enable reviewed Close agent for Goose](../tasks/current/0032-goose-close-agent.md) | B4-close | Current | Codex | 0031 (done) |
 | [0033: Decide the native runtime evidence contract](../tasks/pending/0033-goose-native-proof-contract.md) | C1 | Pending | Unclaimed | 0024 |
 | [0034: Build synthetic native-runtime evidence contract tests](../tasks/pending/0034-goose-runtime-proof-fixtures.md) | C2 | Pending | Unclaimed | 0033, 0026 |
 | [0035: Validate an authorized native runtime evidence producer](../tasks/blocked/0035-goose-native-runtime-integration.md) | C3 | Blocked | Unclaimed | 0034 |
@@ -361,4 +360,4 @@ Public Goose behavior and field/flag terminology were checked against these exac
 
 ### Next decision
 
-Continue at [Task 0024](../tasks/pending/0024-goose-implementation-scope.md) and record the actual direction/scope in [ADR-0002](../decisions/0002-goose-integration-direction.md). The recommendation remains limited native observation first with separately gated native/approval integration; it is not yet accepted. If the intended target is CC-owned ACP agents, explicitly replan that architectural scope before implementation. Do not label partial observation, design completion or a second runtime as full existing-native-agent parity.
+Continue at [Task 0032](../tasks/current/0032-goose-close-agent.md). The accepted direction is native, observation first, with CC-owned code changes in prerequisite order. The blocked native producer and approval-channel gates remain open. Do not label partial observation, design completion or a second runtime as full existing-native-agent parity.

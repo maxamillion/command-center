@@ -7,6 +7,8 @@ use tokio::{
     process::Command,
 };
 
+const HELPER_BOOTSTRAP: &str = "import sys\nlength = int(sys.stdin.buffer.readline())\nsource = sys.stdin.buffer.read(length)\nexec(compile(source, '<command-center-helper>', 'exec'), {'__name__': '__main__'})\n";
+
 #[derive(Clone)]
 pub struct Transport {
     pub host: Host,
@@ -233,8 +235,10 @@ impl Transport {
         request: serde_json::Value,
     ) -> Result<serde_json::Value> {
         let (program, args) =
-            self.command_invocation("python3", vec!["-c".into(), script.into()], false)?;
+            self.command_invocation("python3", vec!["-c".into(), HELPER_BOOTSTRAP.into()], false)?;
         tokio::time::timeout(Duration::from_secs(20), async {
+            let script = script.as_bytes().to_vec();
+            let script_length = format!("{}\n", script.len()).into_bytes();
             let mut child = Command::new(program)
                 .args(args)
                 .stdin(Stdio::piped())
@@ -246,6 +250,8 @@ impl Transport {
             let mut input = child.stdin.take().unwrap();
             let body = serde_json::to_vec(&request)?;
             let write = async move {
+                input.write_all(&script_length).await?;
+                input.write_all(&script).await?;
                 input.write_all(&body).await?;
                 drop(input);
                 Ok::<_, std::io::Error>(())

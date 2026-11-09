@@ -4,7 +4,7 @@ Owner: unclaimed
 Claimed: not claimed
 State: pending (directory is authoritative)
 Phase: E4
-Depends on: [0043](../pending/0043-goose-guarded-outbox.md), [0031](../pending/0031-goose-observation-ui.md)
+Depends on: [0043](../pending/0043-goose-guarded-outbox.md), [0031](../done/0031-goose-observation-ui.md)
 Authorization / external gate: Not authorized for implementation by this tracking package. Task 0024 must record the applicable scope approval; later native/approval work also needs its specific accepted contract and integration consent. Completed prerequisites alone do not grant permission.
 
 ## Goal

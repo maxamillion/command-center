@@ -73,6 +73,7 @@ impl Agents {
 pub(crate) struct Grant {
     pub(crate) host: String,
     pub(crate) target: Target,
+    pub(crate) provider: String,
     pub(crate) identity: String,
     pub(crate) screen: String,
     at: Instant,
@@ -87,13 +88,17 @@ pub(crate) struct Target {
     pub(crate) connection_revision: String,
     pub(crate) conversation: Option<String>,
     pub(crate) before: Option<u64>,
+    pub(crate) history_cursor: Option<String>,
     pub(crate) known_version: Option<String>,
     pub(crate) known_branch: Option<String>,
 }
 impl Target {
     pub(crate) fn request(&self) -> Value {
         json!({"session":self.session,"window":self.window,"pane":self.pane,
-               "conversation":self.conversation,"before":self.before,"known_version":self.known_version,"known_branch":self.known_branch,"action":"details"})
+               "conversation":self.conversation,"before":self.before,"history_cursor":self.history_cursor,"known_version":self.known_version,"known_branch":self.known_branch,"action":"details"})
+    }
+    pub(crate) fn is_latest(&self) -> bool {
+        self.before.is_none() && self.history_cursor.is_none()
     }
 }
 pub(crate) fn result(value: Value) -> Result<Value, ApiError> {
@@ -109,11 +114,122 @@ pub(crate) fn result(value: Value) -> Result<Value, ApiError> {
         .cloned()
         .ok_or_else(|| ApiError(StatusCode::BAD_GATEWAY, "Invalid agent response".into()))
 }
+
+const CAPABILITY_NAMES: [&str; 11] = [
+    "process_observation",
+    "project_history",
+    "current_session_linkage",
+    "verified_phase",
+    "ordinary_message_submission",
+    "acceptance_confirmation",
+    "native_approval",
+    "launch",
+    "resume",
+    "restart",
+    "close_agent",
+];
+
+pub(crate) fn capability_available(provider: &str, capability: &str) -> bool {
+    let established = matches!(provider, "codex" | "claude" | "pi");
+    if !CAPABILITY_NAMES.contains(&capability) {
+        return false;
+    }
+    if provider == "goose" {
+        return matches!(
+            capability,
+            "process_observation" | "project_history" | "close_agent"
+        );
+    }
+    if !established {
+        return false;
+    }
+    !(provider == "pi" && capability == "native_approval")
+}
+
+fn capability_reason(provider: &str, capability: &str) -> &'static str {
+    match (provider, capability) {
+        ("pi", "native_approval") => "Pi dialogs must be handled in the terminal.",
+        ("goose", "process_observation") => {
+            "Goose process observation is available; session linkage and lifecycle evidence are not."
+        }
+        ("goose", "project_history") => {
+            "Goose project history is read-only and is not linked to the running process."
+        }
+        ("goose", "current_session_linkage") => {
+            "The native Goose CLI does not expose verified current-session identity."
+        }
+        ("goose", "verified_phase") => {
+            "No authoritative native Goose lifecycle evidence is available."
+        }
+        ("goose", "ordinary_message_submission") => {
+            "Guarded Goose message submission is not available. Respond in the terminal."
+        }
+        ("goose", "acceptance_confirmation") => "Native Goose input acceptance cannot be verified.",
+        ("goose", "native_approval") => "Goose approvals must be handled in the terminal.",
+        ("goose", "launch") => "Goose launch support is not implemented yet.",
+        ("goose", "resume") => "Exact Goose conversation ownership is not available.",
+        ("goose", "restart") => "Exact Goose conversation ownership is not available.",
+        ("goose", "close_agent") => {
+            "Goose Close agent is available after an exact process and topology review."
+        }
+        _ => "This provider capability is unavailable.",
+    }
+}
+
+pub(crate) fn capability_payload(provider: &str) -> Value {
+    let mut values = serde_json::Map::new();
+    for name in CAPABILITY_NAMES {
+        let available = capability_available(provider, name);
+        values.insert(
+            name.to_owned(),
+            json!({
+                "available": available,
+                "reason": if available { Value::Null } else { json!(capability_reason(provider, name)) },
+            }),
+        );
+    }
+    Value::Object(values)
+}
+
+pub(crate) fn require_capability(provider: &str, capability: &str) -> Result<(), ApiError> {
+    if !matches!(provider, "codex" | "claude" | "pi" | "goose") {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Unsupported agent provider".into(),
+        ));
+    }
+    if !CAPABILITY_NAMES.contains(&capability) {
+        return Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unknown agent capability".into(),
+        ));
+    }
+    if capability_available(provider, capability) {
+        Ok(())
+    } else {
+        Err(ApiError(
+            StatusCode::CONFLICT,
+            capability_reason(provider, capability).into(),
+        ))
+    }
+}
+
 pub(crate) async fn conversation(
     State(state): State<Arc<AppState>>,
     Path(host): Path<String>,
     Query(target): Query<Target>,
 ) -> Result<Json<Value>, ApiError> {
+    if target
+        .history_cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.len() > 1024)
+        || (target.history_cursor.is_some() && target.before.is_some())
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Invalid history paging cursor".into(),
+        ));
+    }
     let _slot = state.file_slots.try_acquire().map_err(|_| {
         ApiError(
             StatusCode::TOO_MANY_REQUESTS,
@@ -133,9 +249,12 @@ pub(crate) async fn conversation(
         &target.window,
         &target.pane,
     );
-    let (_, version) = state.attention.observation_args(&attention_key).await;
+    let (watch, version, order) = state.attention.observation_args(&attention_key).await;
     let mut request = target.request();
     request["known_reply_version"] = json!(version);
+    if target.conversation.is_none() || target.conversation == watch {
+        request["known_reply_order_key"] = json!(order);
+    }
     let mut value = result(machine.transport.agent_request(request).await?)?;
     if state.registry.get(&host).await?.connection_revision != target.connection_revision {
         return Err(ApiError(
@@ -147,9 +266,25 @@ pub(crate) async fn conversation(
         &value["activity"],
         value["context"].as_str().unwrap_or(""),
     );
+    let provider = value["provider"]
+        .as_str()
+        .ok_or_else(|| ApiError(StatusCode::BAD_GATEWAY, "Agent provider unavailable".into()))?
+        .to_owned();
+    value["capabilities"] = capability_payload(&provider);
+    if !capability_available(&provider, "ordinary_message_submission")
+        || !capability_available(&provider, "acceptance_confirmation")
+    {
+        value["send_available"] = json!(false);
+        let name = if capability_available(&provider, "ordinary_message_submission") {
+            "acceptance_confirmation"
+        } else {
+            "ordinary_message_submission"
+        };
+        value["send_reason"] = value["capabilities"][name]["reason"].clone();
+    }
     let attention =
         !value["approval"].is_null() || activity.state == crate::queue::AgentState::Approval;
-    if target.before.is_none() {
+    if target.is_latest() {
         let reply = serde_json::from_value::<crate::attention::Reply>(value["reply"].clone()).ok();
         let view = state
             .attention
@@ -175,6 +310,13 @@ pub(crate) async fn conversation(
         value["outbox_entries"] =
             json!(crate::outbox::history_receipts(&state, scope, &observation).await?);
     }
+    if let Some(messages) = value["messages"].as_array_mut() {
+        for message in messages {
+            if let Some(object) = message.as_object_mut() {
+                object.remove("legacy_position");
+            }
+        }
+    }
     value["card"] = json!(
         crate::agent_cards::view(
             &state,
@@ -196,7 +338,10 @@ pub(crate) async fn conversation(
         );
     }
     crate::questions::enrich(&state, &host, &target, &attention_key, &mut value).await?;
-    if !value["approval"].is_null() && target.before.is_none() {
+    if !capability_available(&provider, "native_approval") {
+        value["approval"] = Value::Null;
+    }
+    if !value["approval"].is_null() && target.is_latest() {
         let mut grants = state.agents.approvals.lock().await;
         grants.retain(|_, g| g.grant.at.elapsed() < Duration::from_secs(120));
         if grants.len() < 512 {
@@ -221,6 +366,7 @@ pub(crate) async fn conversation(
                         grant: Grant {
                             host: host.clone(),
                             target: target.clone(),
+                            provider: provider.clone(),
                             identity: value["instance"].as_str().unwrap_or("").into(),
                             screen: value["screen"].as_str().unwrap_or("").into(),
                             at: Instant::now(),
@@ -250,7 +396,11 @@ pub(crate) async fn conversation(
             choice.as_object_mut().unwrap().remove("key");
         }
     }
-    if value["send_available"] == true && target.before.is_none() {
+    if value["send_available"] == true
+        && capability_available(&provider, "ordinary_message_submission")
+        && capability_available(&provider, "acceptance_confirmation")
+        && target.is_latest()
+    {
         // A durable send may follow only a process-linked conversation, never a
         // project-history selection. Native identity survives backend restart.
         let mut target = target;
@@ -273,6 +423,7 @@ pub(crate) async fn conversation(
             Grant {
                 host,
                 target,
+                provider,
                 identity: value["instance"].as_str().unwrap_or("").into(),
                 screen: value["screen"].as_str().unwrap_or("").into(),
                 at: Instant::now(),
@@ -334,7 +485,7 @@ pub(crate) async fn message(
         )
     })?;
     // Consume before transport IO. A timeout or backend restart must never replay input.
-    let (target, identity, screen) = {
+    let (target, provider, identity, screen) = {
         let mut grants = state.agents.grants.lock().await;
         let grant = grants.get_mut(&message.token).ok_or_else(|| {
             ApiError(
@@ -349,13 +500,17 @@ pub(crate) async fn message(
                     .into(),
             ));
         }
+        require_capability(&grant.provider, "ordinary_message_submission")?;
+        require_capability(&grant.provider, "acceptance_confirmation")?;
         grant.used = true;
         (
             grant.target.clone(),
+            grant.provider.clone(),
             grant.identity.clone(),
             grant.screen.clone(),
         )
     };
+    require_capability(&provider, "ordinary_message_submission")?;
     let machine = state.registry.get(&host).await?;
     if machine.connection_revision != target.connection_revision {
         return Err(ApiError(
@@ -399,10 +554,13 @@ pub(crate) async fn claim_message(
                 .into(),
         ));
     }
+    require_capability(&g.provider, "ordinary_message_submission")?;
+    require_capability(&g.provider, "acceptance_confirmation")?;
     g.used = true;
     Ok(Grant {
         host: g.host.clone(),
         target: g.target.clone(),
+        provider: g.provider.clone(),
         identity: g.identity.clone(),
         screen: g.screen.clone(),
         at: g.at,
@@ -433,7 +591,7 @@ pub(crate) async fn approval(
             "Agent operations busy".into(),
         )
     })?;
-    let (target, identity, screen, approval_id, claim) = {
+    let (target, provider, identity, screen, approval_id, claim) = {
         let mut grants = state.agents.approvals.lock().await;
         let g = grants.get_mut(&decision.token).ok_or_else(|| {
             ApiError(
@@ -454,15 +612,18 @@ pub(crate) async fn approval(
                 "Unknown approval choice".into(),
             ));
         }
+        require_capability(&g.grant.provider, "native_approval")?;
         g.grant.used = true;
         (
             g.grant.target.clone(),
+            g.grant.provider.clone(),
             g.grant.identity.clone(),
             g.grant.screen.clone(),
             g.approval_id.clone(),
             g.claim.clone(),
         )
     };
+    require_capability(&provider, "native_approval")?;
     let machine = state.registry.get(&host).await?;
     let _guard = machine.file_writes.lock().await;
     if state.registry.get(&host).await?.connection_revision != target.connection_revision {
@@ -495,4 +656,66 @@ pub(crate) async fn approval(
         state.agents.save_submitted(&submitted).await?;
     }
     Ok(Json(response?))
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn goose_history_is_read_only_and_only_reviewed_close_is_available() {
+        for capability in [
+            "current_session_linkage",
+            "verified_phase",
+            "ordinary_message_submission",
+            "acceptance_confirmation",
+            "native_approval",
+            "launch",
+            "resume",
+            "restart",
+        ] {
+            assert!(!capability_available("goose", capability));
+            let value = capability_payload("goose");
+            assert_eq!(value[capability]["available"], false);
+            assert!(
+                value[capability]["reason"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty())
+            );
+            assert_eq!(
+                require_capability("goose", capability).unwrap_err().0,
+                StatusCode::CONFLICT
+            );
+        }
+        assert!(capability_available("goose", "process_observation"));
+        assert!(capability_available("goose", "project_history"));
+        let value = capability_payload("goose");
+        assert_eq!(value["process_observation"]["available"], true);
+        assert!(value["process_observation"]["reason"].is_null());
+        assert_eq!(value["project_history"]["available"], true);
+        assert!(capability_available("goose", "close_agent"));
+        assert_eq!(value["close_agent"]["available"], true);
+        assert!(value["close_agent"]["reason"].is_null());
+        require_capability("goose", "close_agent").unwrap();
+        assert!(value["project_history"]["reason"].is_null());
+    }
+
+    #[test]
+    fn existing_provider_capabilities_preserve_supported_actions() {
+        for provider in ["codex", "claude", "pi"] {
+            assert!(capability_available(
+                provider,
+                "ordinary_message_submission"
+            ));
+            assert!(capability_available(provider, "acceptance_confirmation"));
+            assert!(capability_available(provider, "launch"));
+            assert!(capability_available(provider, "restart"));
+        }
+        assert!(capability_available("claude", "native_approval"));
+        assert!(!capability_available("pi", "native_approval"));
+        assert_eq!(
+            require_capability("other", "launch").unwrap_err().0,
+            StatusCode::BAD_REQUEST
+        );
+    }
 }

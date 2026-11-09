@@ -40,7 +40,7 @@ test.afterAll(()=>{backend?.kill('SIGTERM');sshd?.kill('SIGTERM');if(socket)spaw
 async function detail(host='local', extra: Record<string,string>={}) {
   const hosts=await(await fetch(`${base}/api/v1/hosts`)).json();
   const query=new URLSearchParams({session,window,pane,connection_revision:hosts.find((h:{id:string})=>h.id===host).connection_revision,...extra});
-  const r=await fetch(`${base}/api/v1/hosts/${host}/agents/conversation?${query}`);expect(r.status).toBe(200);return r.json();
+  const r=await fetch(`${base}/api/v1/hosts/${host}/agents/conversation?${query}`);expect(r.status,await r.clone().text()).toBe(200);return r.json();
 }
 async function send(token:string,text:string,host='local') { return fetch(`${base}/api/v1/hosts/${host}/agents/message`,{method:'POST',headers:{Origin:base,'Content-Type':'application/json'},body:JSON.stringify({token,text})}); }
 
@@ -125,6 +125,109 @@ test('messages target the current process, reject replay and stale screens, and 
   tmux('send-keys','-t',pane,'-l','Would you like to run this command?\n1. Yes\n2. No\nEsc to cancel\n');
   await expect.poll(async()=> (await detail()).attention).toBe(true);
   const approval=await detail();expect(approval.send_available).toBe(false);expect(approval.message_token).toBeUndefined();
+});
+
+test('provider capability reasons gate message, approval, close, and restart controls',async({page})=>{
+ const host=(await(await fetch(`${base}/api/v1/hosts`)).json()).find((h:{id:string})=>h.id==='local');
+ const names=['process_observation','project_history','current_session_linkage','verified_phase','ordinary_message_submission','acceptance_confirmation','native_approval','launch','resume','restart','close_agent'];
+ const capabilities=Object.fromEntries(names.map(name=>[name,{available:false,reason:`${name} is unavailable for Goose.`}]));
+ const item={id:'goose-capability-fixture',session:'$0',session_name:'fixture',window:'@0',window_name:'goose-project',pane:'%90',project:'/fixture',agent:'goose',prompt:'Live agent',context:'',status:'live',activity:{state:'unknown',source:'none',reason:'No verified evidence',observed_at:1},attention:{key:'a'.repeat(64),instance:'b'.repeat(64),revision:1,finished:false,new_approval:false,unread_reply:false,needs_attention:false},capabilities};
+ await page.route('**/api/v1/queue',route=>route.fulfill({json:{checked_at:1,hosts:[{...host,items:[item]}]}}));
+ await page.route('**/agents/conversation?*',route=>route.fulfill({json:{instance:'b'.repeat(64),context:'',project:'/fixture',provider:'goose',selected:'project-history',association:'project',conversations:[{id:'project-history',session:'goose-session',timestamp:'',linked:false}],messages:[],capabilities,send_available:true,send_reason:'Guarded Goose message submission is unavailable.',message_token:'stale-test-token',attention:false,approval:{id:'fixture',title:'Allow?',context:'Original request',choices:[{id:'yes',label:'Allow'}],token:'stale-approval-token'}}}));
+ await page.goto(base+'/#/queue');await page.locator('.queue-card').click();
+ await expect(page.getByRole('button',{name:'Send message',exact:true})).toHaveCount(0);
+ await expect(page.locator('.queue-chat-notice')).toContainText('Guarded Goose message submission is unavailable');
+ await expect(page.locator('.agent-approval')).toBeHidden();
+ await page.getByRole('button',{name:'Details',exact:true}).click();
+ await expect(page.getByRole('button',{name:'Restart agent…',exact:true})).toBeDisabled();
+ await expect(page.getByRole('button',{name:'Close agent…',exact:true})).toBeDisabled();
+});
+
+test('opaque history IDs sort by order key and a reset replaces stale pages',async({page})=>{
+ const host=(await(await fetch(`${base}/api/v1/hosts`)).json()).find((h:{id:string})=>h.id==='local');
+ const caps={project_history:{available:true,reason:null},ordinary_message_submission:{available:false,reason:'Guarded Goose message submission is unavailable.'}};
+ const item={id:'opaque-history-fixture',session:'$0',session_name:'fixture',window:'@0',window_name:'goose-project',pane:'%91',project:'/fixture',agent:'goose',prompt:'Live agent',context:'',status:'live',activity:{state:'unknown',source:'none',reason:'Unverified phase',observed_at:1},capabilities:caps,attention:{key:'c'.repeat(64),instance:'d'.repeat(64),revision:1,finished:false,new_approval:false,unread_reply:false,needs_attention:false}};
+ await page.route('**/api/v1/queue',route=>route.fulfill({json:{checked_at:1,hosts:[{...host,items:[item]}]}}));
+ const cursorRequests:string[]=[];
+ const latest=[
+  {id:'9223372036854775808',role:'user',text:'Older visible <script>window.__historyAttack=true</script>',timestamp:'',order_key:'00000000000000000001:000000'},
+  {id:'9223372036854775809',role:'assistant',text:'Latest reply <img src=x onerror="window.__historyAttack=true">',timestamp:'',order_key:'00000000000000000002:000000'}
+ ];
+ await page.route('**/agents/conversation?*',route=>{
+  const url=new URL(route.request().url()),cursor=url.searchParams.get('history_cursor');
+  const common={instance:'d'.repeat(64),context:'',project:'/fixture',provider:'goose',selected:'native-session',association:'process',conversations:[{id:'native-session',session:'native-session',timestamp:'',linked:true}],send_available:false,send_reason:'Guarded Goose message submission is unavailable.',attention:false,capabilities:caps,history_version:'r1'};
+  if(cursor){cursorRequests.push(cursor);expect(url.searchParams.get('before')).toBeNull();}
+  if(cursor==='page-one')return route.fulfill({json:{...common,messages:[{id:'9223372036854775807',role:'user',text:'Oldest page',timestamp:'',order_key:'00000000000000000000:000000'}],activities:[],older_cursor:1,history_page:{protocol:'cc.history.v1',store_id:'store-fixture',session_id:'native-session',revision:'r1',reset:false,next_cursor:'page-two'}}});
+  if(cursor==='page-two')return route.fulfill({json:{...common,history_version:'r2',messages:[{id:'native:edited-message',role:'assistant',text:'Reset snapshot',timestamp:'',order_key:'00000000000000000003:000000'}],activities:[{id:'activity:opaque',position:0,order:0,order_key:'00000000000000000001:000001',timestamp:'',kind:'tool',title:'Tool activity',text:'',output:'Updated result',status:'completed'}],history_page:{protocol:'cc.history.v1',store_id:'store-fixture',session_id:'native-session',revision:'r2',reset:true,next_cursor:null}}});
+  return route.fulfill({json:{...common,messages:latest,activities:[{id:'activity:opaque',position:0,order:0,order_key:'00000000000000000001:000001',timestamp:'',kind:'tool',title:'Tool activity',text:'',status:'pending'}],older_cursor:2,history_page:{protocol:'cc.history.v1',store_id:'store-fixture',session_id:'native-session',revision:'r1',reset:false,next_cursor:'page-one'}}});
+ });
+ await page.goto(base+'/#/queue');await page.locator('.queue-card').click();
+ const history=page.getByLabel('Conversation messages');
+ await expect(history.locator(':scope > .agent-message, :scope > .agent-activity')).toHaveCount(3);
+ await expect(history.locator('.agent-message').nth(0)).toContainText('Older visible');
+ await expect(history.locator('.agent-activity')).toContainText('Tool activity');
+ await history.locator('.agent-activity summary').click();
+ await expect(history.locator('.agent-activity')).toHaveAttribute('open','');
+ await expect(history.locator('.agent-message').nth(1)).toContainText('Latest reply');
+ await expect(history.locator('script, img')).toHaveCount(0);
+ expect(await page.evaluate(()=>Boolean((window as any).__historyAttack))).toBe(false);
+ expect(await history.locator(':scope > .agent-message, :scope > .agent-activity').evaluateAll(nodes=>nodes.map(node=>(node as HTMLElement).dataset.messageId||(node as HTMLElement).dataset.activityId))).toEqual(['9223372036854775808','activity:opaque','9223372036854775809']);
+ await page.getByRole('button',{name:'Load older messages',exact:true}).click();
+ await expect(history.locator('.agent-message')).toHaveCount(3);
+ await expect(history.locator('.agent-message').first()).toContainText('Oldest page');
+ await page.getByRole('button',{name:'Load older messages',exact:true}).click();
+ await expect(history.locator('.agent-message')).toHaveCount(1);
+ await expect(history.locator('.agent-message').first()).toContainText('Reset snapshot');
+ await expect(history.locator('.agent-activity')).toHaveAttribute('open','');
+ await expect(history.locator('.agent-activity')).toContainText('Updated result');
+ expect(cursorRequests).toEqual(['page-one','page-two']);
+});
+
+test('Goose history stays unlinked and read-only across compact navigation and desktop filters',async({page,browser})=>{
+ test.setTimeout(60000);
+ await page.goto(base+'/#/terminal');await expect(page.locator('#connection')).toHaveText('Attached');
+ const desktopTmux=tmux('list-panes','-a','-F','#{pane_id} #{pane_pid} #{pane_current_command} #{pane_width}x#{pane_height}');
+ const host=(await(await fetch(base+'/api/v1/hosts')).json()).find((h:{id:string})=>h.id==='local');
+ const names=['process_observation','project_history','current_session_linkage','verified_phase','ordinary_message_submission','acceptance_confirmation','native_approval','launch','resume','restart','close_agent'];
+ const capabilities=Object.fromEntries(names.map(name=>[name,{available:name==='process_observation'||name==='project_history',reason:name==='process_observation'||name==='project_history'?null:`${name} is unavailable for Goose.`}]));
+ const key='a'.repeat(64),instance='b'.repeat(64),conversation='goose-project-history';let unreadReply=true;let acknowledgement:unknown;
+ const readState=()=>({key,instance,revision:12,finished:false,new_approval:false,unread_reply:unreadReply,needs_attention:unreadReply,conversation,reply_cursor:'reply-cursor-12',history_id:'history-id-12'});
+ capabilities.close_agent={available:true,reason:null};
+ const item={id:'goose-observation-fixture',session:'$0',session_name:'fixture',window:'@0',window_name:'goose',pane:'%90',project:'/fixture/goose-project',agent:'goose',prompt:'Live agent',context:'',status:'live',activity:{state:'unknown',source:'none',reason:'No authoritative Goose lifecycle evidence is available.',observed_at:1},capabilities,attention:readState(),card:{revision:2,name:'',notes:'Fixture project history',color:'',pinned:false}};
+ const conversations=[{id:conversation,session:'20261108_fixture',timestamp:'2026-11-08 10:00',linked:false},{id:'other-project-history',session:'20261107_fixture',timestamp:'2026-11-07 10:00',linked:false}];
+ const phone=await browser.newPage({viewport:{width:393,height:852},isMobile:true,hasTouch:true});let terminalSockets=0,terminalRequests=0;
+ phone.on('websocket',socket=>{if(socket.url().includes('/terminal?'))terminalSockets++;});
+ phone.on('request',request=>{if(new URL(request.url()).pathname.includes('/terminal'))terminalRequests++;});
+ await phone.route('**/api/v1/agents/outbox',route=>route.fulfill({json:{entries:[]}}));
+ await phone.route('**/api/v1/queue',route=>route.fulfill({json:{checked_at:Math.floor(Date.now()/1000),hosts:[{...host,items:[{...item,attention:readState()}]}]}}));
+ await phone.route('**/agents/conversation?*',route=>{
+  const url=new URL(route.request().url()),selected=url.searchParams.get('conversation');
+  const common={instance,context:'',project:item.project,provider:'goose',conversations,send_available:true,send_reason:'Guarded Goose message submission is unavailable. Respond in the terminal.',message_token:'stale-message-token',attention:false,capabilities,approval:{id:'unsupported-approval',title:'Allow a tool?',context:'Original request',choices:[{id:'allow',label:'Allow'}],token:'stale-approval-token'},card:item.card};
+  if(!selected)return route.fulfill({json:{...common,association:'none',messages:[],activities:[]}});
+  return route.fulfill({json:{...common,selected,association:'project',messages:[{id:'goose-user-1',role:'user',text:'Question from persisted project history',timestamp:'2026-11-08T10:00:00Z',order_key:'00000000000000000001:000000'},{id:'goose-assistant-1',role:'assistant',text:'Persisted Goose answer',timestamp:'2026-11-08T10:01:00Z',order_key:'00000000000000000002:000000'}],activities:[],read_state:readState(),history_version:'fixture-r1',history_page:{protocol:'cc.history.v1',store_id:'fixture-store',session_id:selected,revision:'fixture-r1',reset:false,next_cursor:null}}});
+ });
+ await phone.route('**/api/v1/attention/read',async route=>{acknowledgement=route.request().postDataJSON();unreadReply=false;await route.fulfill({json:{...readState(),unread_reply:false,needs_attention:false}});});
+ await phone.goto(base+'/#/queue');await expect(phone.locator('.queue-card')).toContainText('Unknown');
+ await expect(phone.locator('.queue-card-name')).toHaveText('goose-project');await expect(phone.locator('.queue-card')).toContainText('Unread reply');
+ await expect(phone.locator('.queue-filter-panel')).not.toHaveAttribute('open','');await phone.locator('.queue-filter-panel>summary').click();await phone.getByLabel('Agent status',{exact:true}).selectOption('needs_attention');
+ await phone.locator('.queue-card').evaluate((button:HTMLButtonElement)=>button.click());await expect(phone.locator('.queue-body')).toHaveAttribute('data-detail','true');const history=phone.getByLabel('Conversation messages');await expect(history).toContainText('Select a conversation to read its history.');
+ await phone.getByRole('button',{name:'Choose conversation',exact:true}).click();
+ const picker=phone.getByLabel('Conversation history',{exact:true});await expect(picker.locator('option').first()).toContainText('Choose unverified project history');await expect(picker.locator('option').nth(1)).toContainText('Unverified project history');
+ await expect(phone.locator('#queue-agent-metadata')).toContainText('It will remain unverified project history');await picker.selectOption(conversation);
+ await expect(history).toContainText('Persisted Goose answer');await expect(phone.locator('#queue-agent-metadata')).toContainText('Command Center cannot verify');
+ await expect(phone.locator('.queue-chat-header .agent-state')).toContainText('Unknown');await expect(phone.locator('.agent-live-activity')).toHaveText('Live status unverified');
+ await expect(phone.locator('.queue-chat-notice')).toContainText('Guarded Goose message submission is unavailable');
+ await expect(phone.getByRole('button',{name:'Send message',exact:true})).toHaveCount(0);await expect(phone.locator('.queue-outbox-button:visible')).toHaveCount(0);await expect(phone.locator('.agent-approval')).toBeHidden();
+ await expect(phone.getByRole('button',{name:'Restart agent…',exact:true})).toBeDisabled();await expect(phone.getByRole('button',{name:'Close agent…',exact:true})).toBeEnabled();
+ await expect.poll(()=>acknowledgement).toEqual({key,instance,revision:12,conversation,reply_cursor:'reply-cursor-12'});
+ await expect(phone.locator('.queue-card')).toHaveCount(0);await expect(history).toContainText('Persisted Goose answer');
+ await phone.getByRole('button',{name:'Details',exact:true}).click();
+ const mobileHistory=await history.boundingBox(),mobileDetail=await phone.locator('.queue-detail').boundingBox();expect(mobileHistory!.height/mobileDetail!.height).toBeGreaterThan(0.6);
+ expect(await phone.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+ await phone.setViewportSize({width:1280,height:850});await expect(phone.locator('.queue-detail')).toBeVisible();await phone.getByLabel('Agent status',{exact:true}).selectOption('needs_attention');
+ await expect(phone.locator('.queue-card')).toHaveCount(0);await expect(history).toContainText('Persisted Goose answer');
+ expect(terminalSockets).toBe(0);expect(terminalRequests).toBe(0);expect(tmux('list-panes','-a','-F','#{pane_id} #{pane_pid} #{pane_current_command} #{pane_width}x#{pane_height}')).toBe(desktopTmux);
+ await phone.close();
 });
 
 test('provider status transitions update filters and disconnected agents remain visible', async ({page}) => {
@@ -466,13 +569,13 @@ test('inline activity for all providers stays collapsed, updates in place, and f
  const host=(await(await fetch(base+'/api/v1/hosts')).json())[0];
  for(const provider of ['claude','codex','pi']) for(const width of [1440,393]){
   const page=await browser.newPage({viewport:{width,height:844}});let completed=false,unchanged=false;let requests=0;
-  const messages=[{id:'10',role:'user',text:'Check this project',timestamp:''},{id:'40',role:'assistant',text:'I am checking the files.',timestamp:''}];
+  const messages=[{id:'10',role:'user',text:'Check this project',timestamp:'',order_key:'00000000000000000010:000000'},{id:'40',role:'assistant',text:'I am checking the files.',timestamp:'',order_key:'00000000000000000040:000000'}];
   const activity=()=>[
-   {id:'activity:20:0',position:20,order:0,kind:'thinking',title:'Thinking',text:'Provider-visible summary',status:'recorded',timestamp:''},
-   {id:'activity:30:0',position:30,order:0,kind:'tool',title:'Read src/main.rs',text:'',arguments:'<script>alert("input")</script>\n'+('long_path/'.repeat(50)),output:completed?'<img src=x onerror=alert(1)>\nFile contents':undefined,status:completed?'completed':'pending',timestamp:''}
+   {id:'activity:20:0',position:20,order:0,order_key:'00000000000000000020:000000',kind:'thinking',title:'Thinking',text:'Provider-visible summary',status:'recorded',timestamp:''},
+   {id:'activity:30:0',position:30,order:0,order_key:'00000000000000000030:000000',kind:'tool',title:'Read src/main.rs',text:'',arguments:'<script>alert("input")</script>\n'+('long_path/'.repeat(50)),output:completed?'<img src=x onerror=alert(1)>\nFile contents':undefined,status:completed?'completed':'pending',timestamp:''}
   ];
   await page.route('**/api/v1/queue',r=>r.fulfill({json:{checked_at:Date.now()/1000,hosts:[{...host,items:[{id:'activity-fixture',session:'$0',session_name:'activity',window:'@0',window_name:'Activity fixture',pane:'%0',project:'/fixture',agent:provider,prompt:'Live agent',context:'',status:'live',activity:{state:'working',source:'fixture',reason:'Fixture',observed_at:Date.now()/1000}}]}]}}));
-  await page.route('**/agents/conversation?*',r=>{requests++;const before=new URL(r.request().url()).searchParams.has('before');return r.fulfill({json:{instance:'activity-process',context:'',project:'/fixture',provider,selected:'fixture-conversation',association:'process',conversations:[{id:'fixture-conversation',session:'fixture-session',timestamp:'',linked:true}],messages:unchanged?[]:before?[{id:'1',role:'assistant',text:'Earlier message',timestamp:''}]:messages,activities:unchanged?undefined:before?[{id:'activity:2:0',position:2,order:0,kind:'tool',title:'Earlier tool',text:'',status:'completed',output:'earlier result',timestamp:''}]:activity(),older_cursor:before?undefined:5,history_unchanged:unchanged,send_available:true,message_token:'fixture-token',attention:false}});});
+  await page.route('**/agents/conversation?*',r=>{requests++;const before=new URL(r.request().url()).searchParams.has('before');return r.fulfill({json:{instance:'activity-process',context:'',project:'/fixture',provider,selected:'fixture-conversation',association:'process',conversations:[{id:'fixture-conversation',session:'fixture-session',timestamp:'',linked:true}],messages:unchanged?[]:before?[{id:'1',role:'assistant',text:'Earlier message',timestamp:'',order_key:'00000000000000000001:000000'}]:messages,activities:unchanged?undefined:before?[{id:'activity:2:0',position:2,order:0,order_key:'00000000000000000002:000000',kind:'tool',title:'Earlier tool',text:'',status:'completed',output:'earlier result',timestamp:''}]:activity(),older_cursor:before?undefined:5,history_unchanged:unchanged,send_available:true,message_token:'fixture-token',attention:false}});});
   await page.goto(base+'/#/queue');if(width<900)await page.locator('.queue-card').click();
   const history=page.getByLabel('Conversation messages',{exact:true});
   await expect(history.locator('.agent-activity')).toHaveCount(2);
@@ -516,11 +619,14 @@ test('assistant Markdown is readable, sanitized, and contained on phones while u
 });
 
 
-async function closeAgentFixture(name:string){
- const targetPane=tmux('new-window','-d','-P','-F','#{pane_id}','-t','agents','-n',name,'-c',dir,agentCommand());const targetWindow=tmux('display-message','-p','-t',targetPane,'#{window_id}');
- await expect.poll(()=>tmux('display-message','-p','-t',targetPane,'#{pane_current_command}')).toBe('codex');
+function gooseAgentCommand(){return `exec env GOOSE_PATH_ROOT=${join(dir,'goose-path-root')} ${join(dir,'goose')} session`;}
+async function closeAgentFixture(name:string,provider:'codex'|'goose'='codex'){
+ if(provider==='goose'){copyFileSync('/bin/cat',join(dir,'goose'));if(!existsSync(join(dir,'session')))command('mkfifo',[join(dir,'session')]);}
+ const command=provider==='goose'?gooseAgentCommand():agentCommand();const targetPane=tmux('new-window','-d','-P','-F','#{pane_id}','-t','agents','-n',name,'-c',dir,command);const targetWindow=tmux('display-message','-p','-t',targetPane,'#{window_id}');
+ await expect.poll(()=>tmux('display-message','-p','-t',targetPane,'#{pane_current_command}')).toBe(provider);
  const hosts=await(await fetch(base+'/api/v1/hosts')).json();const revision=hosts.find((h:any)=>h.id==='local').connection_revision;
- const d=await(await fetch(base+'/api/v1/hosts/local/agents/conversation?'+new URLSearchParams({session,window:targetWindow,pane:targetPane,connection_revision:revision}))).json();
+ const response=await fetch(base+'/api/v1/hosts/local/agents/conversation?'+new URLSearchParams({session,window:targetWindow,pane:targetPane,connection_revision:revision}));const d=await response.json();expect(response.status,JSON.stringify(d)).toBe(200);
+ expect(d.provider).toBe(provider);
  return{connection_revision:revision,session,window:targetWindow,agent_pane:targetPane,agent_instance:d.instance};
 }
 
@@ -542,8 +648,31 @@ test('Close agent rejects replacement processes, changed topology and removal of
  expect((await post({...target,expected:preview.expected})).status).toBe(409);expect(tmux('list-windows','-a','-F','#{window_id}')).toContain(target.window);
 });
 
+test('Goose Close binds the exact process and linked-window topology, and compact confirmation preserves other panes',async({page})=>{
+ const target=await closeAgentFixture('goose-close-agent','goose');const url=base+'/api/v1/hosts/local/windows/close';
+ const originalPane=tmux('display-message','-p','-t',pane,'#{pane_pid}/#{window_width}x#{window_height}');const unrelated=await cardTarget();const unrelatedCard=await(await cardRead(unrelated)).json();expect((await cardSave(unrelated,unrelatedCard.revision,'Preserved unrelated card')).status).toBe(200);
+ tmux('new-session','-d','-s','goose-close-link','/bin/sleep','86400');tmux('link-window','-k','-s',target.window,'-t','goose-close-link:0');
+ const siblingPane=tmux('new-window','-d','-P','-F','#{pane_id}','-t','agents','-n','goose-preserve-window','-c',dir,'/bin/sleep','86400');const sibling=tmux('display-message','-p','-t',siblingPane,'#{pane_pid}/#{pane_current_command}');
+ const readPreview=async()=>{const response=await fetch(url+'?'+new URLSearchParams(target));expect(response.status).toBe(200);return response.json();};
+ const close=async(expected:string)=>fetch(url,{method:'POST',headers:{Origin:base,'Content-Type':'application/json'},body:JSON.stringify({...target,expected})});
+ let preview=await readPreview();expect(preview.panes).toBe(1);expect(preview.affected_sessions.map((s:any)=>s.name)).toContain('goose-close-link');expect(preview.affected_sessions.find((s:any)=>s.name==='goose-close-link').last_window).toBe(true);
+ tmux('split-window','-d','-t',target.window,'/bin/sleep','86400');expect((await close(preview.expected)).status).toBe(409);expect(tmux('list-windows','-a','-F','#{window_id}').split('\n')).toContain(target.window);
+ preview=await readPreview();expect(preview.panes).toBe(2);tmux('respawn-pane','-k','-t',target.agent_pane,'-c',dir,agentCommand());await expect.poll(()=>tmux('display-message','-p','-t',target.agent_pane,'#{pane_current_command}')).toBe('codex');
+ expect((await close(preview.expected)).status).toBe(409);expect(tmux('list-windows','-a','-F','#{window_id}').split('\n')).toContain(target.window);
+ tmux('respawn-pane','-k','-t',target.agent_pane,'-c',dir,gooseAgentCommand());await expect.poll(()=>tmux('display-message','-p','-t',target.agent_pane,'#{pane_current_command}')).toBe('goose');
+ const hosts=await(await fetch(base+'/api/v1/hosts')).json();target.connection_revision=hosts.find((h:any)=>h.id==='local').connection_revision;
+ const current=await(await fetch(base+'/api/v1/hosts/local/agents/conversation?'+new URLSearchParams({session,window:target.window,pane:target.agent_pane,connection_revision:target.connection_revision}))).json();target.agent_instance=current.instance;expect(current.capabilities.close_agent.available).toBe(true);
+ let sockets=0,terminalRequests=0;page.on('websocket',socket=>{if(socket.url().includes('/terminal?'))sockets++;});page.on('request',request=>{if(new URL(request.url()).pathname.includes('/terminal'))terminalRequests++;});
+ await page.setViewportSize({width:393,height:852});await page.goto(base+'/#/queue');const card=page.locator('.queue-card').filter({hasText:'goose-close-agent'});await expect(card).toBeVisible();await card.click();await page.getByRole('button',{name:'Details',exact:true}).click();await page.getByRole('button',{name:'Close agent…',exact:true}).click();
+ const dialog=page.getByRole('dialog',{name:'Close agent',exact:true});await expect(dialog.getByRole('button',{name:'Close agent and window',exact:true})).toBeEnabled();await expect(dialog).toContainText('2 panes');await expect(dialog).toContainText('Linked sessions');await expect(dialog).toContainText('last window in goose-close-link');await expect(dialog.getByRole('button',{name:'Cancel',exact:true})).toBeFocused();
+ await dialog.getByRole('button',{name:'Cancel',exact:true}).click();expect(tmux('list-windows','-a','-F','#{window_id}').split('\n')).toContain(target.window);
+ await page.getByRole('button',{name:'Close agent…',exact:true}).click();await page.getByRole('dialog',{name:'Close agent',exact:true}).getByRole('button',{name:'Close agent and window',exact:true}).click();await expect(page.locator('.queue-card').filter({hasText:'goose-close-agent'})).toHaveCount(0,{timeout:15000});
+ expect(tmux('list-windows','-a','-F','#{window_id}').split('\n')).not.toContain(target.window);expect(tmux('list-sessions','-F','#{session_name}').split('\n')).not.toContain('goose-close-link');expect(tmux('display-message','-p','-t',siblingPane,'#{pane_pid}/#{pane_current_command}')).toBe(sibling);expect(tmux('display-message','-p','-t',pane,'#{pane_pid}/#{window_width}x#{window_height}')).toBe(originalPane);expect((await(await cardRead(unrelated)).json()).name).toBe('Preserved unrelated card');
+ expect(sockets).toBe(0);expect(terminalRequests).toBe(0);
+});
+
 test('desktop Close agent menu shows linked last-session consequences and never retries a lost response',async({page})=>{
- const target=await closeAgentFixture('menu-close-agent');tmux('new-session','-d','-s','agent-close-link','/bin/sleep','86400');tmux('link-window','-k','-s',target.window,'-t','agent-close-link:0');
+ const target=await closeAgentFixture('menu-close-agent','goose');tmux('new-session','-d','-s','agent-close-link','/bin/sleep','86400');tmux('link-window','-k','-s',target.window,'-t','agent-close-link:0');
  await page.goto(base+'/#/queue');const card=page.locator('.queue-card').filter({hasText:'menu-close-agent'}).first();await card.focus();await card.press('Shift+F10');await page.getByRole('menuitem',{name:'Close agent…',exact:true}).click();const dialog=page.getByRole('dialog',{name:'Close agent',exact:true});await expect(dialog).toContainText('Linked sessions');await expect(dialog).toContainText('last window in agent-close-link');await expect(dialog.getByRole('button',{name:'Close agent and window',exact:true})).toBeEnabled();
  let posts=0;await page.route('**/windows/close',async route=>{if(route.request().method()==='POST'){posts++;await route.fetch();await route.abort('connectionfailed');}else await route.continue();});await dialog.getByRole('button',{name:'Close agent and window',exact:true}).click();await expect(dialog).toContainText('will not be retried');await expect(dialog.getByRole('button',{name:'Close agent and window',exact:true})).toBeDisabled();expect(posts).toBe(1);expect(tmux('list-windows','-a','-F','#{window_id}').split('\n')).not.toContain(target.window);expect(tmux('list-sessions','-F','#{session_name}').split('\n')).not.toContain('agent-close-link');
 });
@@ -603,7 +732,7 @@ test('pinned groups preserve attention ordering and filters while custom colors 
   {id:'ordinary-ready',pin:false,state:'ready',attention:false,color:'url(https://example.com)'}
  ].map((v,i)=>({id:v.id,session:'$0',session_name:'fixture',window:`@${i}`,pane:`%${i}`,window_name:v.id,project:'/fixture/project',agent:'codex',prompt:v.attention?'Approve fixture operation?':'Live agent',status:'live',activity:{state:v.state,source:v.attention?'terminal_prompt':'codex_events',observed_at:Date.now()/1000},card:{revision:2,name:v.id,notes:'',color:v.color,pinned:v.pin},attention:{key:'a'.repeat(64),instance:String(i).padStart(64,'0'),revision:1,new_approval:v.attention,needs_attention:v.attention}}));
  await page.route('**/api/v1/queue',r=>r.fulfill({json:{checked_at:Date.now()/1000,hosts:[{...host,items}]}}));await page.route('**/agents/conversation?*',r=>r.fulfill({json:{instance:'0'.repeat(64),project:'/fixture/project',provider:'codex',context:'',conversations:[],messages:[],send_available:false,attention:false}}));
- await page.goto(base+'/#/queue');await expect(page.locator('.queue-card-name')).toHaveText(['pinned-approval','pinned-ready','normal-approval','ordinary-ready']);const approval=page.locator('.queue-card').filter({hasText:'pinned-approval'});await expect(approval).toHaveClass(/needs-attention/);await expect(approval.locator('.agent-state')).toContainText('Approval');await expect(approval.getByRole('img',{name:'New approval'})).toBeVisible();expect(await approval.evaluate(el=>getComputedStyle(el).borderLeftColor)).toBe('rgb(127, 174, 232)');expect(await approval.locator('.agent-state').evaluate(el=>getComputedStyle(el).color)).toBe('rgb(255, 191, 137)');await expect(page.locator('.queue-card').filter({hasText:'ordinary-ready'})).not.toHaveClass(/has-custom-color/);
+ await page.goto(base+'/#/queue');await expect(page.locator('.queue-card-name')).toHaveText(['pinned-approval','pinned-ready','normal-approval','ordinary-ready']);const approval=page.locator('.queue-card').filter({hasText:'pinned-approval'});await expect(approval).toHaveClass(/needs-attention/);await expect(approval.locator('.agent-state')).toContainText('Approval');await expect(approval.getByRole('img',{name:'Possible approval prompt'})).toBeVisible();expect(await approval.evaluate(el=>getComputedStyle(el).borderLeftColor)).toBe('rgb(127, 174, 232)');expect(await approval.locator('.agent-state').evaluate(el=>getComputedStyle(el).color)).toBe('rgb(255, 191, 137)');await expect(page.locator('.queue-card').filter({hasText:'ordinary-ready'})).not.toHaveClass(/has-custom-color/);
  await page.getByLabel('Agent status',{exact:true}).selectOption('needs_attention');await expect(page.locator('.queue-card-name')).toHaveText(['pinned-approval','normal-approval']);
 });
 

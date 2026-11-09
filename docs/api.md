@@ -74,6 +74,21 @@ The file PUT route allows an 8 MiB JSON body to accommodate escaped text, but de
 Treat connection revisions as opaque and retain the one from the original read until the file is explicitly reopened. They change on connection edits and backend restarts. Clients must preserve drafts on 409, never silently retarget a save by substituting a newer machine token, and guard asynchronous reloads against edits made while the request was in flight.
 
 
+## Agent history cursors
+
+`GET /hosts/{id}/agents/conversation` accepts an exact tmux target and connection revision. Optional `history_cursor` is a bounded opaque paging token; it cannot be combined with the legacy numeric `before` parameter. New clients pass `history_page.next_cursor` back as `history_cursor` and do not decode it. Legacy `before` and `older_cursor` remain supported for existing clients.
+
+Responses may include `history_page` with `protocol: "cc.history.v1"`, an opaque `store_id`, native `session_id`, opaque `revision`, `reset`, and nullable `next_cursor`. A cursor is bound to its provider, store, conversation and revision. If the source changes while a client is paging, the helper returns the latest page with `reset: true`; clients discard older merged pages and show the reset. Malformed or cross-source cursors fail closed instead of being treated as legacy offsets.
+
+Each message/activity has a string `id` for display identity and may have an ASCII `order_key` for stable ordering within that conversation. IDs are opaque; clients must not parse them as numbers. `order_key` is lexically sortable but is not an acknowledgement cursor. `reply_order_key` is a separate source-order key used by backend read-state reconciliation. `reply.cursor` identifies the exact observed assistant reply; `reply.version` identifies the observation revision, while `reply.reset` indicates edits/reinsertions that must be baselined without manufacturing unread replies. These values are not proof that a submitted input was accepted. Legacy file receipts retain their existing numeric byte-position fields and semantics.
+
+The provider-store identity, current-session linkage and lifecycle/acceptance evidence are distinct. A selected project log, opaque history cursor or terminal prompt does not establish that the log belongs to the running process or authorize input.
+
+Goose exposes `project_history` as read-only history for the configured project directory. Candidate sessions are explicitly unlinked project history; a shared database or a sole candidate never identifies which session the running CLI is using. The adapter accepts schema 17 only, returns at most 100 source rows per page and five pages per loaded window, and rechecks fingerprints for previously loaded pages before continuing. Edits, truncation, compaction, replacement or delete/reinsert changes invalidate the cursor and return the latest page with `reset: true`. User-visible text follows both row visibility and content audience; tool requests/results appear as bounded activity, while user-role tool output, confirmation/control blocks, hidden context, signatures, redacted content and resource paths are excluded. Media is shown as an omission placeholder.
+
+Goose rows describe persisted state, not a live stream. Tool activity can be incomplete when the bounded occurrence scan cannot establish call/result pairing; in that case calls remain Awaiting result. A persisted user-role row is never evidence of human input acceptance. Project history does not establish current-session linkage, Working/Ready, message submission, approval, launch or other process actions; those capabilities remain unavailable.
+
+
 ## Explicit agent restart
 
 Coordinator permission and post-package-update sequence: see [coordinator restarts](reference/coordinator-restarts.md). Update first, then prepare against the current installed CLI; no automatic replay after uncertain restart.

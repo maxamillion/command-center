@@ -57,6 +57,7 @@ pub(crate) async fn prepare(
     Path(host): Path<String>,
     Query(query): Query<Prepare>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::agents::require_capability(&query.provider, "launch")?;
     let _slot = state.file_slots.try_acquire().map_err(|_| {
         ApiError(
             StatusCode::TOO_MANY_REQUESTS,
@@ -166,6 +167,11 @@ pub(crate) async fn start(
         })?;
         if g.host != host || g.used || g.at.elapsed() >= Duration::from_secs(120) {
             return Err(ApiError(StatusCode::GONE,"Launch authorization expired or already used; check the launch instead of retrying".into()));
+        }
+        let provider = g.prepared["provider"].as_str().unwrap_or("");
+        crate::agents::require_capability(provider, "launch")?;
+        if start.conversation.is_some() {
+            crate::agents::require_capability(provider, "resume")?;
         }
         if let Some(conversation) = &start.conversation
             && !g.prepared["conversations"].as_array().is_some_and(|items| {

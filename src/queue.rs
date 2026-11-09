@@ -66,6 +66,17 @@ fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+fn provider_hint(command: &str) -> Option<&'static str> {
+    match command.to_ascii_lowercase().as_str() {
+        "codex" => Some("codex"),
+        "claude" => Some("claude"),
+        "pi" | "pi-coding-agent" => Some("pi"),
+        "goose" => Some("goose"),
+        _ => None,
+    }
+}
+
 impl Activity {
     fn unknown(reason: &str) -> Self {
         Self {
@@ -106,6 +117,7 @@ struct Item {
     window_name: String,
     pane: String,
     project: String,
+    capabilities: Value,
     agent: String,
     prompt: String,
     context: String,
@@ -244,7 +256,7 @@ pub(crate) async fn snapshot(State(state): State<Arc<AppState>>) -> Json<Snapsho
                     result.limited |= value["ok"]["limited"]==true;
                     for agent in agents.iter().take(256) {
                         if let (Some(pane),Some(provider))=(agent["pane"].as_str(),agent["provider"].as_str())
-                            && matches!(provider,"codex"|"claude"|"pi") {
+                            && matches!(provider,"codex"|"claude"|"pi"|"goose") {
                             providers.insert(pane.to_owned(),provider.to_owned());
                         }
                     }
@@ -254,14 +266,14 @@ pub(crate) async fn snapshot(State(state): State<Arc<AppState>>) -> Json<Snapsho
                     for window in session.windows {
                         for pane in window.panes {
                             let command = pane.command.to_lowercase();
-                            let hinted=if command.contains("codex"){Some("codex")}else if command.contains("claude"){Some("claude")}else if command=="pi"||command=="pi-coding-agent"{Some("pi")}else{None};
+                            let hinted = provider_hint(&command);
                             let provider=providers.get(&pane.id).cloned().or_else(||hinted.map(str::to_owned));
                             let Some(provider)=provider else {continue;};
                             if !seen.insert(pane.id.clone()) { continue; }
                             if seen.len() > 32 { result.limited = true; continue; }
                             let (endpoint,attention_key)=crate::attention::scope(&machine.config,&session.id,&window.id,&pane.id);
-                            let (watch,version)=state.attention.observation_args(&attention_key).await;
-                            let observation = machine.transport.agent_request(json!({"action":"status", "session":session.id,"window":window.id,"pane":pane.id,"conversation":watch,"known_reply_version":version})).await;
+                            let (watch,version,order)=state.attention.observation_args(&attention_key).await;
+                            let observation = machine.transport.agent_request(json!({"action":"status", "session":session.id,"window":window.id,"pane":pane.id,"conversation":watch,"known_reply_version":version,"known_reply_order_key":order})).await;
                             let (context, activity, instance, reply, background_tasks) = match observation {
                                 // A dead/replaced foreground process is retained below
                                 // with its original last-seen time, never refreshed as live.
@@ -284,7 +296,7 @@ pub(crate) async fn snapshot(State(state): State<Arc<AppState>>) -> Json<Snapsho
                             result.items.push(Item {
                                 id:format!("{}/{}/{}/{}/{}",host.id,host.connection_revision,session.id,window.id,pane.id),
                                 session:session.id.clone(), session_name:session.name.clone(), window:window.id.clone(), window_name:window.name.clone(),
-                                pane:pane.id, project:pane.cwd, agent:provider,
+                                pane:pane.id, project:pane.cwd, capabilities:crate::agents::capability_payload(&provider), agent:provider,
                                 status:if activity.state == AgentState::Approval {"attention"} else {"live"}.into(),
                                 prompt:detected.unwrap_or_else(|| if activity.state == AgentState::Approval {if matches!(activity.source.as_str(),"pi_bridge"|"claude_input") {"Agent is waiting for input"} else if activity.source=="terminal_question" {&activity.reason} else {"Agent is awaiting approval"}} else {"Live agent"}.into()),
                                 context:context.chars().take(24000).collect(), activity, last_seen:now(), attention,card:Default::default(),background_tasks,
@@ -319,6 +331,18 @@ pub(crate) async fn snapshot(State(state): State<Arc<AppState>>) -> Json<Snapsho
 mod tests {
     use super::*;
     #[test]
+    fn pane_command_provider_hints_are_exact() {
+        assert_eq!(provider_hint("codex"), Some("codex"));
+        assert_eq!(provider_hint("claude"), Some("claude"));
+        assert_eq!(provider_hint("pi"), Some("pi"));
+        assert_eq!(provider_hint("pi-coding-agent"), Some("pi"));
+        assert_eq!(provider_hint("goose"), Some("goose"));
+        assert_eq!(provider_hint("my-claude-wrapper"), None);
+        assert_eq!(provider_hint("codex-helper"), None);
+        assert_eq!(provider_hint("my-goose"), None);
+    }
+
+    #[test]
     fn disconnection_keeps_last_seen_and_expires_without_refreshing_it() {
         let item = Item {
             id: "target".into(),
@@ -328,6 +352,7 @@ mod tests {
             window_name: "w".into(),
             pane: "%0".into(),
             project: "/tmp".into(),
+            capabilities: crate::agents::capability_payload("codex"),
             agent: "codex".into(),
             prompt: "Live agent".into(),
             context: String::new(),
@@ -366,6 +391,7 @@ mod tests {
             window_name: "agent".into(),
             pane: "%1".into(),
             project: "/tmp".into(),
+            capabilities: crate::agents::capability_payload("codex"),
             agent: "codex".into(),
             prompt: "Live agent".into(),
             context: String::new(),

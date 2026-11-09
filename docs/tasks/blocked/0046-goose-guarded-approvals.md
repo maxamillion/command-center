@@ -4,7 +4,7 @@ Owner: unclaimed
 Claimed: not claimed
 State: blocked (directory is authoritative)
 Phase: F2-F3
-Depends on: [0045](../pending/0045-goose-approval-contract.md), [0035](../blocked/0035-goose-native-runtime-integration.md), [0026](../pending/0026-goose-capability-guards.md)
+Depends on: [0045](../pending/0045-goose-approval-contract.md), [0035](../blocked/0035-goose-native-runtime-integration.md), [0026](../done/0026-goose-capability-guards.md)
 Authorization / external gate: Explicitly blocked on an accepted, implemented native decision channel coordinated with the terminal UI; none is selected. User and native integration maintainer must supply/approve this before implementation.
 
 ## Goal

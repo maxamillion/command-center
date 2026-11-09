@@ -4,7 +4,7 @@ Owner: unclaimed
 Claimed: not claimed
 State: pending (directory is authoritative)
 Phase: C1
-Depends on: [0024](../pending/0024-goose-implementation-scope.md)
+Depends on: [0024](../done/0024-goose-implementation-scope.md)
 Authorization / external gate: Not authorized for implementation by this tracking package. Task 0024 must record the applicable scope approval; later native/approval work also needs its specific accepted contract and integration consent. Completed prerequisites alone do not grant permission.
 
 ## Goal

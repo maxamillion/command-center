@@ -1,5 +1,5 @@
 export type AgentActivityEntry = {
-  id: string; position: number; order: number; timestamp: string;
+  id: string; position?: number; order: number; order_key?: string; timestamp: string;
   kind: 'thinking' | 'tool'; title: string; status: 'recorded' | 'pending' | 'completed' | 'error' | 'background';
   text: string; arguments?: string; output?: string; truncated?: boolean;
 };

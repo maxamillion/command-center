@@ -1260,6 +1260,7 @@ mod tests {
                 connection_revision: "runtime".into(),
                 conversation: Some("conversation".into()),
                 before: None,
+                history_cursor: None,
                 known_version: None,
                 known_branch: None,
             },

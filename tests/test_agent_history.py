@@ -127,6 +127,67 @@ class AgentHistory(unittest.TestCase):
         self.assertIsNone(cursor)
         self.assertEqual([int(m['text'].split(':')[0]) for m in messages],list(range(300)))
 
+    def test_history_cursor_is_opaque_source_bound_and_resets_after_revision_change(self):
+        self.write([{'type':'response_item','payload':{'type':'message','role':'assistant','content':f'Reply {i}'}} for i in range(105)])
+        chosen={'id':'fixture-conversation','session':'native-session','path':str(self.log)}
+        page=agent.history(self.log,'codex')
+        self.assertIsInstance(page['messages'][0]['id'],str)
+        self.assertEqual(page['messages'][0]['order_key'],page['messages'][0]['reply_order_key'])
+        self.assertEqual(page['messages'],sorted(page['messages'],key=lambda message:message['order_key']))
+        self.assertIsNotNone(page['older_cursor'])
+        _,revision=agent.transcript_version(chosen)
+        token=agent.encode_history_cursor('codex',chosen,revision,page['older_cursor'])
+        self.assertTrue(token.startswith('cc-history-v1.'))
+        self.assertLessEqual(len(token),1024)
+        self.assertEqual(agent.decode_history_cursor(token,'codex',chosen,revision),(page['older_cursor'],False))
+
+        with self.log.open('a') as output:
+            output.write(json.dumps({'type':'response_item','payload':{'type':'message','role':'assistant','content':'New reply'}})+'\n')
+        _,updated_revision=agent.transcript_version(chosen)
+        self.assertNotEqual(updated_revision,revision)
+        self.assertEqual(agent.decode_history_cursor(token,'codex',chosen,updated_revision),(None,True))
+
+    def test_history_cursor_rejects_wrong_provider_or_store_without_legacy_fallback(self):
+        self.write([{'type':'response_item','payload':{'type':'message','role':'assistant','content':'Reply'}}])
+        chosen={'id':'fixture-conversation','session':'native-session','path':str(self.log)}
+        _,revision=agent.transcript_version(chosen)
+        token=agent.encode_history_cursor('codex',chosen,revision,0)
+        with self.assertRaises(agent.Failure) as error:
+            agent.decode_history_cursor(token,'claude',chosen,revision)
+        self.assertEqual(error.exception.status,409)
+        with self.assertRaises(agent.Failure) as error:
+            agent.decode_history_cursor('before=100','codex',chosen,revision)
+        self.assertEqual(error.exception.status,400)
+
+    def test_reply_rewrite_resets_when_latest_row_moves_back_or_disappears(self):
+        records=[
+            {'type':'response_item','payload':{'type':'message','role':'assistant','content':'Older reply'}},
+            {'type':'response_item','payload':{'type':'message','role':'assistant','content':'Latest reply'}},
+        ]
+        self.write(records)
+        chosen={'id':'fixture-conversation','session':'native-session','path':str(self.log)}
+        previous=agent.reply_observation(chosen,'codex')
+        self.write(records[:1])
+        moved_back=agent.reply_observation(chosen,'codex',previous['version'],previous['reply_order_key'])
+        self.assertTrue(moved_back['reset'])
+        self.assertLess(moved_back['reply_order_key'],previous['reply_order_key'])
+
+        previous=moved_back
+        self.write([])
+        disappeared=agent.reply_observation(chosen,'codex',previous['version'],previous['reply_order_key'])
+        self.assertTrue(disappeared['reset'])
+        self.assertIsNone(disappeared['cursor'])
+
+    def test_tool_only_append_does_not_reset_latest_reply_cursor(self):
+        self.write([{'type':'response_item','payload':{'type':'message','role':'assistant','content':'Visible reply'}}])
+        chosen={'id':'fixture-conversation','session':'native-session','path':str(self.log)}
+        previous=agent.reply_observation(chosen,'codex')
+        with self.log.open('a') as output:
+            output.write(json.dumps({'type':'response_item','payload':{'type':'function_call_output','output':'hidden'}})+'\n')
+        refreshed=agent.reply_observation(chosen,'codex',previous['version'],previous['reply_order_key'])
+        self.assertFalse(refreshed['reset'])
+        self.assertEqual(refreshed['cursor'],previous['cursor'])
+
     def test_claude_registry_requires_live_process_start_and_tmux_target(self):
         pid = os.getpid()
         base, start, _ = agent.proc(pid)

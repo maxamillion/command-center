@@ -91,6 +91,7 @@ pub(crate) async fn prepare(
             .agent_request(target.request("restart_prepare"))
             .await?,
     )?;
+    agents::require_capability(plan["provider"].as_str().unwrap_or(""), "restart")?;
     if plan["identity"].as_str() != Some(&target.instance)
         || s.registry.get(&host).await?.connection_revision != target.connection_revision
     {
@@ -135,6 +136,7 @@ pub(crate) async fn start(
     if r.host != host {
         return Err(conflict("Restart belongs to another machine"));
     }
+    agents::require_capability(r.plan["provider"].as_str().unwrap_or(""), "restart")?;
     let m = s.registry.get(&host).await?;
     let _endpoint = m.file_writes.lock().await;
     if s.registry.get(&host).await?.connection_revision != r.target.connection_revision {
@@ -188,6 +190,7 @@ pub(crate) async fn status(
     if r.host != host {
         return Err(conflict("Restart belongs to another machine"));
     }
+    agents::require_capability(r.plan["provider"].as_str().unwrap_or(""), "restart")?;
     if r.state == "prepared" || r.state == "complete" {
         return Ok(Json(public(&r)));
     }

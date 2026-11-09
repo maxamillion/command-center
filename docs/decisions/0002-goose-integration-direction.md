@@ -1,36 +1,39 @@
 # ADR-0002: Goose integration direction and authorization gates
 
-Status: Proposed — no implementation direction accepted.
+Status: Accepted for the native Goose implementation scope recorded below; conditional design gates remain Proposed.
 Date: 2026-11-06.
 Decision authority: user; native integration maintainer/owner also required for external implementation or installation scope.
 
 ## Context
 
-[Plan 0002](../plans/0002-goose-agent-parity.md) identifies independently useful CC-only native observation work and additional native evidence/decision dependencies for guarded full parity. The user requested a resumable implementation-tracking package following the repository conventions. That request authorizes documentation preparation, not feature implementation or selection of native versus managed-ACP architecture.
+[Plan 0002](../plans/0002-goose-agent-parity.md) identifies independently useful CC-only native observation work and additional native evidence/decision dependencies for guarded full parity. On 2026-11-06, the user explicitly requested: “please follow and implement Plan 0002 in order to implement support for goose into this project.” This authorizes Command Center implementation work under the native Goose plan, in dependency order, with observation first. It does not authorize upstream/third-party repository changes, installation or activation of an external integration, or actions against live Goose agents. The plan's external native producer and approval-channel gates remain binding.
 
-[Task 0024](../tasks/pending/0024-goose-implementation-scope.md) records the next actual scope decision. Detailed native lifecycle/acceptance and approval contracts need their own subsequently allocated ADRs; their exact interfaces and producers are not chosen by this record.
+[Task 0024](../tasks/done/0024-goose-implementation-scope.md) records the accepted scope decision. Detailed native lifecycle/acceptance and approval contracts need their own subsequently allocated ADRs; their exact interfaces and producers are not chosen by this record.
 
 ## Decision
 
-**No option is accepted yet.** The recommendation under review is observation-first native support, with guarded operations remaining unavailable until their independent evidence and authorization gates pass. This is not a change to current application behavior or operating rules.
+**Accepted direction:** implement native Goose support in Command Center, beginning with the limited observation milestone and following the execution task dependency graph. Treat this scope as authorization for CC-owned code, synthetic fixtures, and qualification work in tasks 0025–0034 and 0036–0049 when prerequisites are satisfied. Runtime capabilities remain disabled until their task acceptance criteria and evidence pass.
+
+This authorization does not supply the named, pinned, consented native producer required by task 0035 or the implemented terminal-coordinated decision channel required by task 0046. Those tasks remain blocked. It does not authorize upstream Goose changes, third-party installs/hooks, or live launch/send/restart/close/approval actions. Such operations require their stated separate gates and explicit operational authorization.
 
 | Gate | Proposed scope / choice to resolve | Current disposition | Owner / action |
 |---|---|---|---|
-| Observation architecture | Native tmux process observation + read-only history, or explicitly separate managed-ACP replanning, or defer | Awaiting user choice | Task 0024 obtains and records the actual direction. |
-| CC-only implementation | Authorize provider/cursor/capability foundations and limited observation tasks 0025–0032, then observation qualification 0048 | Not authorized | User identifies accepted scope; dependency completion alone is not permission. |
-| Native proof design/spike | Authorize detailed native ownership/settled/input-provenance design and synthetic contract work 0033–0034 | Not authorized; contract not accepted | User authorizes scope; implementer allocates a detailed Proposed ADR/spec and seeks acceptance. |
-| Actual native producer | Upstream capability versus explicitly maintained opt-in integration; named owner, pinned revision and test/installation scope | No producer selected; task 0035 blocked | User + integration owner select/authorize the producer and isolated validation. |
-| Launch / Board | Authorize literal argv, fresh detached process launch/Board work 0036–0038, independently of exact session linkage | Not authorized | User may approve this limited scope separately; no newest-session association. |
-| Exact lifecycle / messages | Authorize exact resume/restart/input/receipt/Outbox/feedback work 0039–0044 once native gates are evidenced | Not authorized; actual native proof missing | User-approved scope plus prerequisite contract, evidence and action-time guards. |
-| Approval contract / channel | Design 0045 and actual guarded decision implementation 0046, coordinated with native terminal UI | No accepted contract or channel; 0046 blocked | User + integration owner approve a detailed contract and implemented channel. |
-| Background-task parity | Assess provider evidence and approve implementation or record explicit remaining gap in 0047 | Unresolved | User-scoped investigation; a deferred/unavailable outcome is not full parity. |
+| Observation architecture | Native tmux process observation + read-only history, or explicitly separate managed-ACP replanning, or defer | **Accepted: native, observation-first** | User's 2026-11-06 implementation request; follow Plan 0002 dependencies. |
+| CC-only implementation | Provider/cursor/capability foundations and observation tasks 0025–0032, then qualification 0048 | **Authorized in dependency order** | Code and synthetic fixtures only; runtime capabilities require evidence. |
+| Native proof design/spike | Native ownership/settled/input-provenance design and synthetic contract work 0033–0034 | **Authorized in dependency order; contract acceptance remains separate** | Detailed contract must be recorded and accepted before actual producer integration. |
+| Actual native producer | Upstream capability versus explicitly maintained opt-in integration; named owner, pinned revision and test/installation scope | No producer selected; task 0035 blocked | User + integration owner must select/authorize producer and isolated validation. |
+| Launch / Board | Literal argv, fresh detached process launch/Board work 0036–0038, independently of exact session linkage | **CC-owned code authorized in dependency order** | No live launches; no newest-session association; operational action still needs separate authorization. |
+| Exact lifecycle / messages | Exact resume/restart/input/receipt/Outbox/feedback work 0039–0044 after native gates | **CC-owned code authorized only after prerequisites** | Actual native proof and action-time guards remain required; no live messages/actions. |
+| Approval contract / channel | Design 0045 and guarded decision implementation 0046 coordinated with native terminal UI | Design work authorized after prerequisites; 0046 blocked | User + integration owner must approve an implemented channel. |
+| Background-task parity | Assess provider evidence and implement or record remaining gap in 0047 | **Authorized in dependency order** | A deferred/unavailable outcome remains an unmet full-parity criterion. |
 | Deployment / live operations | Install/reload integrations on live agents, mutate external projects, launch/send/restart/close real work agents or deploy | Not authorized | Separate explicit operational authorization; ledger tasks/Board state never grant it. |
 
 When an actual choice is made, record its date, authority, exact scope and reference in the decision log below and the affected task. If only the observation direction is accepted, this ADR can be Accepted **only for that documented direction and scope**; unresolved native/approval contracts remain Proposed in their own ADRs and their task gates stay closed. Do not mark all rows accepted because one scope is approved. If the user instead directs implementation with an explicit scope, record that direction here rather than repeatedly requesting the same approval.
 
 ### Decision log
 
-No architecture/implementation approvals recorded. Documentation-only preparation on 2026-11-06 is tracked in [Task 0023](../tasks/done/0023-goose-execution-tracking.md).
+- **2026-11-06 — user:** “please follow and implement Plan 0002 in order to implement support for goose into this project.” Accepted native Goose direction and authorized CC-owned implementation work in the execution tracker, in prerequisite order, with limited observation first. External producer/approval dependencies and operational actions remain separately gated. Captured by [Task 0024](../tasks/done/0024-goose-implementation-scope.md).
+- Documentation-only preparation on 2026-11-06 is tracked in [Task 0023](../tasks/done/0023-goose-execution-tracking.md).
 
 ## Alternatives and consequences
 

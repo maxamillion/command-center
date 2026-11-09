@@ -4,7 +4,7 @@ Owner: unclaimed
 Claimed: not claimed
 State: pending (directory is authoritative)
 Phase: C2
-Depends on: [0033](../pending/0033-goose-native-proof-contract.md), [0026](../pending/0026-goose-capability-guards.md)
+Depends on: [0033](../pending/0033-goose-native-proof-contract.md), [0026](../done/0026-goose-capability-guards.md)
 Authorization / external gate: Not authorized for implementation by this tracking package. Task 0024 must record the applicable scope approval; later native/approval work also needs its specific accepted contract and integration consent. Completed prerequisites alone do not grant permission.
 
 ## Goal

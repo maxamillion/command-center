@@ -156,7 +156,7 @@ pub(crate) async fn enrich(
     if let Some(r) = existing {
         q["receipt"] = public(&r);
     }
-    if supported && linked && target.before.is_none() && q["submitted"] != true {
+    if supported && linked && target.is_latest() && q["submitted"] != true {
         let mut grants = s.questions.grants.lock().await;
         grants.retain(|_, g| g.at.elapsed() < Duration::from_secs(120));
         if grants.len() < 512 {
@@ -476,6 +476,20 @@ mod tests {
             .await
             .unwrap();
         assert!(value["input_request"]["token"].is_null());
+        for opaque in [false, true] {
+            let mut older = g.target.clone();
+            if opaque {
+                older.history_cursor = Some("opaque-history-page".into());
+            } else {
+                older.before = Some(100);
+            }
+            let mut page = base.clone();
+            page["association"] = json!("process");
+            enrich(&s, "fixture", &older, "scope", &mut page)
+                .await
+                .unwrap();
+            assert!(page["input_request"]["token"].is_null());
+        }
         value = base;
         value["association"] = json!("process");
         enrich(&s, "fixture", &g.target, "scope", &mut value)
