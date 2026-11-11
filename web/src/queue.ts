@@ -20,7 +20,7 @@ type Item = { background_tasks?:BackgroundSnapshot|null;capabilities?:Capabiliti
 type Host = { id: string; name: string; connection_revision: string; error?: string; limited: boolean; items: Item[] };
 type Snapshot = { checked_at: number; hosts: Host[] };
 type Message = { id: string; role: 'user' | 'assistant'; text: string; timestamp: string; order?: number; order_key?: string; reply_order_key?: string; truncated?: boolean };
-type HistoryPage = { protocol: 'cc.history.v1'; store_id: string; session_id: string; revision: string; reset: boolean; next_cursor?: string | null };
+type HistoryPage = { protocol: 'cc.history.v1'; store_id: string; session_id: string; revision: string; reset: boolean; next_cursor?: string | null; view_cursor?: string | null; replace?: boolean };
 type Conversation = { id: string; session: string; timestamp: string; linked: boolean };
 type Approval = { id: string; title: string; context: string; choices: { id: string; label: string }[]; token?: string; submitted?: boolean };
 type InputRequest = InputQuestion;
@@ -517,7 +517,10 @@ export class AttentionQueue {
     if (this.detailData?.history_branch) query.set('known_branch', this.detailData.history_branch);
     if (historyCursor) query.set('history_cursor', historyCursor);
     else if (before != null) query.set('before', String(before));
-    else if (!reset && this.detailData?.history_version) query.set('known_version', this.detailData.history_version);
+    else if (!reset && this.detailData?.history_version) {
+      query.set('known_version', this.detailData.history_version);
+      if (this.detailData.history_page?.view_cursor) query.set('history_view', this.detailData.history_page.view_cursor);
+    }
     if (reset) this.detailFeedback.textContent = 'Loading conversation…';
     try {
       const response = await fetch(`/api/v1/hosts/${encodeURIComponent(h.id)}/agents/conversation?${query}`, { signal: AbortSignal.timeout(25000) });
@@ -526,16 +529,21 @@ export class AttentionQueue {
       if (request !== this.detailRequest || key !== this.selected) return;
       if(data.history_page?.reset)data.history_reset=true;
       const previous = this.detailData;
+      const historyBounds = this.history.getBoundingClientRect();
+      const anchor = [...this.history.querySelectorAll<HTMLElement>('[data-message-id]')]
+        .find(element => element.getBoundingClientRect().bottom > historyBounds.top);
+      const anchorId = anchor?.dataset.messageId;
+      const anchorOffset = anchor ? anchor.getBoundingClientRect().top - historyBounds.top : 0;
       if (data.history_unchanged && previous) {
         data.messages = previous.messages; data.activities = previous.activities; data.activity_limited = previous.activity_limited; data.older_cursor = previous.older_cursor; data.history_page = previous.history_page; data.history_branch = previous.history_branch; data.history_notice = previous.history_notice;
-      } else if (!data.history_reset && (before != null || historyCursor != null) && previous && previous.selected === data.selected && previous?.instance === data.instance && (!previous.history_page || !data.history_page || previous.history_page.revision === data.history_page.revision)) {
+      } else if (!data.history_page?.replace && !data.history_reset && (before != null || historyCursor != null) && previous && previous.selected === data.selected && previous?.instance === data.instance && (!previous.history_page || !data.history_page || previous.history_page.revision === data.history_page.revision)) {
         const known = new Set(previous.messages.map(m => m.id));
         data.messages = [...data.messages.filter(m => !known.has(m.id)), ...previous.messages];
         const activities = new Map((previous.activities || []).map(a => [a.id, a]));
         for (const activity of data.activities || []) activities.set(activity.id, activity);
         data.activities = [...activities.values()];
         data.message_token = previous.message_token; data.read_state = previous.read_state;
-      } else if (!data.history_reset && !reset && before == null && historyCursor == null && previous && previous.selected === data.selected && previous?.instance === data.instance && (previous.messages.length || previous.activities?.length)) {
+      } else if (!data.history_page?.replace && !data.history_reset && !reset && before == null && historyCursor == null && previous && previous.selected === data.selected && previous?.instance === data.instance && (previous.messages.length || previous.activities?.length)) {
         const known = new Set(data.messages.map(m => m.id));
         const first = data.messages[0] ? historyKey(data.messages[0]) : '';
         data.messages = [...previous.messages.filter(m => !known.has(m.id) && (!first || compareHistoryKeys(historyKey(m), first) < 0)), ...data.messages];
@@ -605,7 +613,12 @@ export class AttentionQueue {
       if (!data.history_unchanged) { if (data.history_notice) this.history.prepend(node('p', data.history_notice)); this.history.prepend(this.older); }
       if(data.outbox_entries)this.outbox.ingest(data.outbox_entries);
       this.renderOutbox();
-      if (before != null || historyCursor != null) this.history.scrollTop = top + this.history.scrollHeight - height;
+      const retainedAnchor = data.history_page?.replace && !data.history_reset && !reset && anchorId
+        ? [...this.history.querySelectorAll<HTMLElement>('[data-message-id]')].find(element => element.dataset.messageId === anchorId)
+        : undefined;
+      if (retainedAnchor && (!nearBottom || before != null || historyCursor != null)) {
+        this.history.scrollTop += retainedAnchor.getBoundingClientRect().top - this.history.getBoundingClientRect().top - anchorOffset;
+      } else if (before != null || historyCursor != null) this.history.scrollTop = top + this.history.scrollHeight - height;
       else if (reset || nearBottom) {
         this.history.scrollTop = this.history.scrollHeight;
         requestAnimationFrame(() => { if (request === this.detailRequest && key === this.selected) { this.history.scrollTop = this.history.scrollHeight; void this.acknowledge(); } });

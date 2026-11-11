@@ -387,13 +387,22 @@ class GooseSessionStore:
             return 1
         return 0
 
-    def _query(self,sql,parameters=()):
+    def _query(self,sql,parameters=(),*,max_bytes=None):
         if self.connection is None: fail(409,'Goose session store is unavailable')
         self._steps=0
         self._deadline=min(time.monotonic()+GOOSE_STORE_MAX_QUERY_SECONDS,
                            self._opened_at+GOOSE_STORE_MAX_TOTAL_SECONDS)
         try:
-            rows=self.connection.execute(sql,parameters).fetchall()
+            cursor=self.connection.execute(sql,parameters)
+            try:
+                rows=[];size=0
+                for row in cursor:
+                    if max_bytes is not None:
+                        size+=sum(len(value.encode('utf-8')) if isinstance(value,str)
+                                  else len(value) if isinstance(value,bytes) else 8 for value in row)
+                        if size>max_bytes: fail(409,'Goose session store exceeds the read byte budget')
+                    rows.append(row)
+            finally: cursor.close()
         except (sqlite3.Error,UnicodeError,ValueError,OverflowError):
             fail(409,'Goose session store is busy, corrupt or outside the read budget')
         self._check_identity()
@@ -513,32 +522,31 @@ class GooseSessionStore:
                                    updated_at=updated_at,archived=archived_at is not None,linked=False))
         return dict(conversations=candidates,limited=limited,store_identity=self.expected_identity)
 
-    def messages(self,session_id,before=None):
+    def messages(self,session_id,before=None,*,through=None,after=None,limit=GOOSE_STORE_MAX_MESSAGES,role=None):
         if not _goose_text_is_bounded(session_id,256) or not session_id:
             fail(400,'Invalid Goose conversation')
         self._eligible_session(session_id)
         parameters=[session_id]
         clause=''
-        if before is not None:
-            if (not isinstance(before,(list,tuple)) or len(before)!=2
-                    or any(not isinstance(value,str) or not value.isascii() or not value.isdecimal() for value in before)):
-                fail(400,'Invalid Goose history cursor')
-            timestamp,message_id=map(int,before)
-            if timestamp>2**63-1 or message_id>2**63-1 or message_id<1:
-                fail(400,'Invalid Goose history cursor')
-            clause=' AND (created_timestamp < ? OR (created_timestamp = ? AND id < ?))'
-            parameters.extend((timestamp,timestamp,message_id))
-        parameters.append(GOOSE_STORE_MAX_MESSAGES+1)
+        if not 1<=limit<=GOOSE_STORE_MAX_HISTORY_ROWS: fail(400,'Invalid Goose history limit')
+        for marker,comparison in ((before,'<'),(through,'<='),(after,'>=')):
+            if marker is None: continue
+            timestamp,message_id=goose_history_marker(marker)
+            clause+=f' AND (created_timestamp,id) {comparison} (?,?)'
+            parameters.extend((timestamp,message_id))
+        if role is not None:
+            clause+=' AND role=?';parameters.append(role)
+        parameters.append(limit+1)
         rows=self._query(
             'SELECT id,message_id,session_id,role,content_json,created_timestamp,metadata_json '
             'FROM messages WHERE session_id=?'+clause+
-            ' ORDER BY created_timestamp DESC,id DESC LIMIT ?',parameters)
+            ' ORDER BY created_timestamp DESC,id DESC LIMIT ?',parameters,max_bytes=GOOSE_STORE_MAX_HISTORY_BYTES)
         messages=[]
-        budget=GOOSE_STORE_MAX_PAGE_BYTES
+        budget=min(GOOSE_STORE_MAX_HISTORY_BYTES,GOOSE_STORE_MAX_PAGE_BYTES*((limit+99)//100))
         source_bytes=0
         fingerprint=hashlib.sha256(b'goose-source-page-v1\0')
-        limited=len(rows)>GOOSE_STORE_MAX_MESSAGES
-        selected=rows[:GOOSE_STORE_MAX_MESSAGES]
+        limited=False
+        selected=rows[:limit]
         for row in selected:
             (row_id,message_id,owner,role,content_json,created_timestamp,metadata_json)=row
             try:
@@ -586,14 +594,33 @@ class GooseSessionStore:
                                  turn_context=metadata.get('turnContext') is True,
                                  compaction_summary=metadata.get('compactionSummary') is True))
             budget-=content_size+metadata_size
-        older=None
-        if len(rows)>GOOSE_STORE_MAX_MESSAGES and selected:
-            oldest=selected[-1]
-            if isinstance(oldest[0],int) and isinstance(oldest[5],int):
-                older=(str(oldest[5]),str(oldest[0]))
+        def marker(row):
+            if row is None: return None
+            try:
+                value=(str(row[5]),str(row[0]));goose_history_marker(value)
+                return value
+            except Failure: return None
+        newest=marker(selected[0]) if selected else None
+        oldest=marker(selected[-1]) if selected else None
+        older=oldest if len(rows)>limit else None
         messages.reverse()
-        return dict(messages=messages,older=older,limited=limited,store_identity=self.expected_identity,
+        return dict(messages=messages,older=older,newest=newest,oldest=oldest,row_count=len(selected),
+                    limited=limited,store_identity=self.expected_identity,
                     fingerprint=fingerprint.hexdigest(),source_bytes=source_bytes)
+
+    def latest_reply(self,session_id):
+        """Search assistant rows independently of display pages, with explicit scan limits."""
+        before=None;source_bytes=0
+        for _ in range(GOOSE_STORE_MAX_ACTIVITY_ROWS//GOOSE_STORE_MAX_MESSAGES):
+            try: page=self.messages(session_id,before,role='assistant')
+            except Failure: return None,False
+            source_bytes+=page['source_bytes']
+            if source_bytes>GOOSE_STORE_MAX_ACTIVITY_BYTES: return None,False
+            for row in reversed(page['messages']):
+                if goose_row_visible(row) and goose_chat_text(row)[0].strip(): return row,True
+            before=page['older']
+            if before is None: return None,not page['limited']
+        return None,False
 
     def history_window_fingerprint(self,session_id):
         """Fingerprint every source row a client may load across the bounded page window."""
@@ -882,42 +909,75 @@ def goose_history_revision(store_id,fingerprint):
     return hashlib.sha256(f'goose-revision-v1:{store_id}:{fingerprint}'.encode()).hexdigest()
 
 
-def encode_goose_history_cursor(store_id,chosen,revision,pages,before):
-    payload=dict(v=1,provider='goose',store=store_id,conversation=chosen['id'],session=chosen['session'],
-                 revision=revision,pages=pages,before=before)
-    raw=json.dumps(payload,separators=(',',':'),sort_keys=True).encode()
-    token='cc-history-v1.'+base64.urlsafe_b64encode(raw).decode().rstrip('=')
-    if len(token)>1024: fail(500,'Goose history cursor exceeded its limit')
-    return token
+def goose_history_marker(marker):
+    if (not isinstance(marker,(list,tuple)) or len(marker)!=2
+            or any(not isinstance(value,str) or not 1<=len(value)<=19
+                   or not value.isascii() or not value.isdecimal() for value in marker)):
+        fail(400,'Invalid Goose history cursor')
+    timestamp,row_id=map(int,marker)
+    if timestamp>2**63-1 or not 1<=row_id<=2**63-1:
+        fail(400,'Invalid Goose history cursor')
+    return timestamp,row_id
 
 
-def decode_goose_history_cursor(token,store_id,chosen):
-    if not isinstance(token,str) or len(token)>1024 or not token.startswith('cc-history-v1.'):
-        fail(400,'Invalid history cursor')
-    encoded=token[len('cc-history-v1.'):]
-    try:
-        raw=base64.b64decode(encoded+'='*((-len(encoded))%4),altchars=b'-_',validate=True)
-        payload=json.loads(raw)
-    except (ValueError,UnicodeError): fail(400,'Invalid history cursor')
-    if not isinstance(payload,dict) or set(payload)!={'v','provider','store','conversation','session','revision','pages','before'} or payload.get('v')!=1:
-        fail(400,'Invalid history cursor')
-    if (payload.get('provider')!='goose' or payload.get('store')!=store_id
-            or payload.get('conversation')!=chosen.get('id') or payload.get('session')!=chosen.get('session')):
-        fail(409,'History cursor belongs to another source; reload the latest history')
-    pages=payload.get('pages');before=payload.get('before')
-    if (not isinstance(pages,list) or not 1<=len(pages)<GOOSE_STORE_MAX_HISTORY_PAGES
-            or not isinstance(payload.get('revision'),str) or not re.fullmatch(r'[0-9a-f]{64}',payload['revision'])):
-        fail(400,'Invalid history cursor')
-    for page in pages:
-        if not isinstance(page,dict) or set(page)!={'before','fingerprint'} or not re.fullmatch(r'[0-9a-f]{64}',str(page.get('fingerprint',''))):
+class GooseHistorySnapshot:
+    """Compact, source-bound proof of the displayed range; no per-page token growth.
+
+    Refresh revalidates that exact range before retaining it. The full replacement
+    response keeps browser retention bounded and removes stale activity as well as
+    stale chat. These display proofs never establish process or input authority.
+    """
+    PREFIX='cc-history-v1.'
+
+    def __init__(self,store,session_id,store_id):
+        self.store=store;self.session_id=session_id;self.store_id=store_id
+
+    def encode(self,page):
+        if not page['newest'] or not page['oldest']: return None
+        payload=dict(v=2,store=self.store_id,top=page['newest'],bottom=page['oldest'],
+                     fingerprint=page['fingerprint'],rows=page['row_count'])
+        raw=json.dumps(payload,separators=(',',':'),sort_keys=True).encode()
+        return self.PREFIX+base64.urlsafe_b64encode(raw).decode().rstrip('=')
+
+    def decode(self,token):
+        if not isinstance(token,str) or len(token)>1024 or not token.startswith(self.PREFIX):
             fail(400,'Invalid history cursor')
-        marker=page.get('before')
-        if marker is not None and (not isinstance(marker,list) or len(marker)!=2 or any(not isinstance(value,str) or not value.isascii() or not value.isdecimal() for value in marker)):
+        encoded=token[len(self.PREFIX):]
+        try:
+            payload=json.loads(base64.b64decode(encoded+'='*((-len(encoded))%4),altchars=b'-_',validate=True))
+        except (ValueError,UnicodeError,RecursionError): fail(400,'Invalid history cursor')
+        if (not isinstance(payload,dict) or set(payload)!={'v','store','top','bottom','fingerprint','rows'}
+                or payload.get('v')!=2 or type(payload.get('rows')) is not int
+                or not 1<=payload['rows']<=GOOSE_STORE_MAX_HISTORY_ROWS
+                or not isinstance(payload.get('fingerprint'),str)
+                or not re.fullmatch(r'[0-9a-f]{64}',payload['fingerprint'])):
             fail(400,'Invalid history cursor')
-    if not isinstance(before,list) or len(before)!=2 or any(not isinstance(value,str) or not value.isascii() or not value.isdecimal() for value in before):
-        fail(400,'Invalid history cursor')
-    if any(int(value)>2**63-1 for value in before): fail(400,'Invalid history cursor')
-    return payload
+        if payload['store']!=self.store_id:
+            fail(409,'History cursor belongs to another source; reload the latest history')
+        if goose_history_marker(payload['top'])<goose_history_marker(payload['bottom']):
+            fail(400,'Invalid history cursor')
+        return payload
+
+    def load(self,token=None,*,older=False):
+        if token is None: return self.store.messages(self.session_id),False
+        previous=self.decode(token)
+        verified=self.store.messages(self.session_id,through=previous['top'],after=previous['bottom'],
+                                     limit=GOOSE_STORE_MAX_HISTORY_ROWS)
+        if verified['fingerprint']!=previous['fingerprint'] or verified['row_count']!=previous['rows']:
+            return self.store.messages(self.session_id),True
+        bottom=previous['bottom']
+        if older and previous['rows']<GOOSE_STORE_MAX_HISTORY_ROWS:
+            extra=self.store.messages(self.session_id,bottom,
+                                      limit=min(GOOSE_STORE_MAX_MESSAGES,GOOSE_STORE_MAX_HISTORY_ROWS-previous['rows']))
+            bottom=extra['oldest'] or bottom
+        current=self.store.messages(self.session_id,after=bottom,limit=GOOSE_STORE_MAX_HISTORY_ROWS)
+        # The range query has a lower bound, so discover whether more history
+        # exists separately. Never carry more than 500 source rows in a view.
+        if current['row_count']<GOOSE_STORE_MAX_HISTORY_ROWS and current['oldest']:
+            probe=self.store.messages(self.session_id,current['oldest'],limit=1)
+            current['older']=current['oldest'] if probe['row_count'] else None
+        else: current['older']=None
+        return current,False
 
 
 def goose_history_page(observation,chosen,request):
@@ -932,34 +992,12 @@ def goose_history_page(observation,chosen,request):
         revision_source=window['fingerprint'] if window['complete'] else 'partial:'+latest['fingerprint']
         revision=goose_history_revision(store_id,revision_source)
         token=request.get('history_cursor')
-        reset=False
-        loaded=[]
-        page_specs=[]
-        current=latest
-        if token is not None:
-            cursor=decode_goose_history_cursor(token,store_id,chosen)
-            verified=[]
-            changed=cursor['revision']!=revision or cursor['pages'][0].get('before') is not None or cursor['pages'][0]['fingerprint']!=latest['fingerprint']
-            for page_spec in cursor['pages']:
-                if changed: break
-                snapshot=latest if page_spec.get('before') is None else store.messages(session_id,page_spec['before'])
-                if snapshot['fingerprint']!=page_spec['fingerprint']:
-                    changed=True;break
-                verified.append(snapshot)
-            if (not changed and (not verified or list(verified[-1].get('older') or ())!=cursor['before'])):
-                changed=True
-            if changed:
-                reset=True;current=latest;loaded=[latest];page_specs=[dict(before=None,fingerprint=latest['fingerprint'])]
-            else:
-                current=store.messages(session_id,cursor['before'])
-                loaded=verified+[current]
-                page_specs=[dict(before=page.get('before'),fingerprint=page['fingerprint']) for page in cursor['pages']]
-                page_specs.append(dict(before=cursor['before'],fingerprint=current['fingerprint']))
-        else:
-            loaded=[latest];page_specs=[dict(before=None,fingerprint=latest['fingerprint'])]
-
-        loaded_bytes=sum(page.get('source_bytes',0) for page in loaded)
-        raw_rows=[row for page in loaded for row in page['messages']]
+        view=request.get('history_view')
+        if token is not None and view is not None: fail(400,'Conflicting history cursors')
+        snapshot=GooseHistorySnapshot(store,session_id,store_id)
+        current,reset=snapshot.load(token if token is not None else view,older=token is not None)
+        raw_rows=current['messages']
+        loaded_bytes=current['source_bytes']
         wanted=set()
         for row in raw_rows:
             if goose_row_visible(row) and row.get('role')=='assistant':
@@ -970,13 +1008,11 @@ def goose_history_page(observation,chosen,request):
         activities,activity_limited=goose_activity_entries(raw_rows,occurrences,chosen['id'])
         messages=[]
         message_budget=512000
-        for row in current['messages']:
-            if message_budget<=0: break
-            if not goose_row_visible(row): continue
-            text,order=goose_chat_text(row)
-            if not text.strip(): continue
+        visible=[(row,*goose_chat_text(row)) for row in current['messages'] if goose_row_visible(row)]
+        visible=[entry for entry in visible if entry[1].strip()]
+        for index,(row,text,order) in enumerate(visible):
             row_id=int(row['id']);timestamp=int(row['created_timestamp'])
-            allowance=message_budget
+            allowance=message_budget//(len(visible)-index)
             shown=text[:min(16000,allowance)]
             message_budget-=len(shown)
             digest=hashlib.sha256(f"goose-message-v1:{store_id}:{row_id}:{row['role']}:{text}".encode()).hexdigest()
@@ -987,31 +1023,38 @@ def goose_history_page(observation,chosen,request):
             messages.append(message)
             if message_budget<=0: break
 
-        page_limited=(any(page.get('limited') for page in loaded) or activity_limited
+        page_limited=(current['limited'] or activity_limited
                       or loaded_bytes>GOOSE_STORE_MAX_HISTORY_BYTES or not window['complete'])
-        next_cursor=None
-        if (window['complete'] and current.get('older') is not None and len(page_specs)<GOOSE_STORE_MAX_HISTORY_PAGES
-                and loaded_bytes<GOOSE_STORE_MAX_HISTORY_BYTES):
-            next_cursor=encode_goose_history_cursor(store_id,chosen,revision,page_specs,current['older'])
+        view_cursor=snapshot.encode(current)
+        next_cursor=view_cursor if (window['complete'] and current['older'] is not None
+                                   and current['row_count']<GOOSE_STORE_MAX_HISTORY_ROWS
+                                   and loaded_bytes<GOOSE_STORE_MAX_HISTORY_BYTES) else None
         notice=None
-        if reset: notice='Goose history changed while paging; the latest page was reloaded.'
+        if reset: notice='Goose history changed; the latest persisted page was reloaded.'
         elif activity_limited: notice='Some Goose activity could not be paired safely within the bounded history scan.'
         elif page_limited: notice='Some Goose history was omitted to keep this view bounded.'
-        elif len(page_specs)>=GOOSE_STORE_MAX_HISTORY_PAGES and current.get('older') is not None:
-            notice='Older Goose history is limited to five pages.'
+        elif current['row_count']>=GOOSE_STORE_MAX_HISTORY_ROWS:
+            notice='Older Goose history is limited to 500 source rows.'
 
-        if token is None and request.get('known_version') is not None and request.get('known_version')!=revision:
+        # Older clients without a displayed-range proof still get conservative resets.
+        if token is None and view is None and request.get('known_version') is not None and request.get('known_version')!=revision:
             reset=True
             notice='Goose history changed; the latest persisted page was reloaded.'
         unchanged=bool(token is None and request.get('known_version')==revision and not reset)
-        if unchanged: messages=[];activities=[]
         reply=goose_reply_observation(observation,chosen,request.get('known_reply_version'),
                                       request.get('known_reply_order_key'),latest,store)
+        reply['displayed']=any(message['reply_order_key']==reply.get('reply_order_key')
+                               and message['role']=='assistant' for message in messages)
+        if unchanged: messages=[];activities=[]
+        if reply.get('limited'):
+            page_limited=True
+            notice=notice or 'Latest Goose reply observation is outside the bounded scan.'
         return dict(messages=messages,activities=activities,activity_limited=activity_limited,
                     limited=page_limited,history_version=revision,history_reset=reset,
                     history_notice=notice,history_unchanged=unchanged,
                     history_page=dict(protocol='cc.history.v1',store_id=store_id,session_id=session_id,
-                                      revision=revision,reset=reset,next_cursor=next_cursor),
+                                      revision=revision,reset=reset,next_cursor=next_cursor,
+                                      view_cursor=view_cursor,replace=True),
                     reply=reply)
 
 
@@ -1019,17 +1062,23 @@ def goose_reply_observation(observation,chosen,known_version=None,known_order=No
     if not chosen: return None
     if store is None:
         with GooseSessionStore(observation) as opened:
-            page=page or opened.messages(chosen['session'])
             return goose_reply_observation(observation,chosen,known_version,known_order,page,opened)
-    if page is None: page=store.messages(chosen['session'])
     store_id=goose_history_store_id(observation,chosen)
+    if page is None:
+        try: page=store.messages(chosen['session'])
+        except Failure:
+            return dict(conversation=chosen['id'],version=known_version or '',cursor=None,
+                        unchanged=True,reset=False,limited=True)
+
     version=goose_history_revision(store_id,page['fingerprint'])
     result=dict(conversation=chosen['id'],session_id=chosen['session'],source_id=store_id,
                 version=version,cursor=None,order_key=None,reply_order_key=None,
                 reset=False,unchanged=False,mtime_ns=0,position=0)
-    rows=[row for row in page['messages'] if row.get('role')=='assistant' and goose_row_visible(row)
-          and goose_chat_text(row)[0].strip()]
-    latest=rows[-1] if rows else None
+    latest,complete=store.latest_reply(chosen['session'])
+    if not complete:
+        # An incomplete search cannot erase read metadata or claim a newer reply.
+        result.update(unchanged=True,version=known_version or version,limited=True)
+        return result
     # The latest page bounds source rows, including tool-only records. Absence
     # from that page does not prove the previously observed reply was deleted.
     previous=store.reply_row(chosen['session'],known_order) if known_order else None
@@ -1046,7 +1095,7 @@ def goose_reply_observation(observation,chosen,known_version=None,known_order=No
         result['reply_order_key']=order
         if isinstance(message_id,str) and message_id and len(message_id)<=256:
             result['cursor']=hashlib.sha256(f'goose-reply-v1:{store_id}:{chosen["session"]}:{message_id}'.encode()).hexdigest()
-    result['unchanged']=known_version==version and (not known_order or bool(previous_text.strip()))
+    result['unchanged']=known_version==version and result['reply_order_key']==known_order
     if not result['unchanged'] and known_order:
         if latest is None or result['reply_order_key'] is None or result['reply_order_key']<known_order:
             result['reset']=True
@@ -2885,6 +2934,8 @@ def execute(request):
                     capabilities=capability_payload(observation['kind']),reply=reply,
                     activity=provider_activity(observation, candidates),background_tasks=observed_background_tasks(observation,chosen if len(linked)==1 and chosen is linked[0] else None))
         if observation.get('history_error'): result['history_unavailable']=observation['history_error']
+        if reply and reply.get('limited'):
+            result['history_unavailable']='Latest Goose reply observation is outside the bounded scan.'
         return result
     if request.get('action') == 'outbox_status':
         if request.get('identity') and observation['identity'] != request['identity']:

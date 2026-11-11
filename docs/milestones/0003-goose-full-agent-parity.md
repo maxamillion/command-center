@@ -28,4 +28,4 @@ Task [0035](../tasks/blocked/0035-goose-native-runtime-integration.md) needs a s
 
 ## Completion
 
-Not completed; no feature implementation or native interoperability evidence yet. Only accept this milestone when every criterion has linked evidence, all required capability gaps are closed and maintained docs describe the actual supported combinations. Reduced-scope delivery must be labeled as such rather than redefining full parity by checking unavailable capabilities off. This record grants no live actions or deployment authorization.
+Not completed; the observation subset is implemented under Milestone 0002, while native evidence, guarded actions and full-parity interoperability qualification remain incomplete. Only accept this milestone when every criterion has linked evidence, all required capability gaps are closed and maintained docs describe the actual supported combinations. Reduced-scope delivery must be labeled as such rather than redefining full parity by checking unavailable capabilities off. This record grants no live actions or deployment authorization.

@@ -6,6 +6,14 @@ State: current
 
 ## Current rebase (2026-11-13)
 
+Latest checkpoint: final replay 89c06dd stopped on two PLAN.md blocks only. Resolved the active-task wording and merged handoffs while retaining November 13 and upstream Whiteboard entries. All source changes applied without conflicts. No commands remain after this pending commit; the rebase still requires local staging/continuation before success can be confirmed.
+
+Final combined verification: 194 Python tests passed (agent suites excluding test_agent_attachments; busy input, pi receipts, Codex histories/status, attachment helper, launch policy, Claude continuation, Python-venv, named-target unit cases and question-response suites). The named-target real-tmux test was explicitly excluded after its earlier socket-permission failure; test_question_api and browser/live API integration remain unexecuted. Frontend TypeScript/Vite build to /tmp/cc-rebase-final-nov13-web passed with existing import/chunk warnings. cargo fmt --check and git diff --check passed. Rust compile/tests/Clippy remain blocked by uncached image; no pass is claimed for them. Target::is_latest remains shared with question grant enforcement, and current/older-history distinctions remain intact after the final replay.
+
+Next: git add -u and GIT_EDITOR=true git rebase --continue locally. Keep this task current until Git confirms the rebase completed; immutable ledger-number collisions remain a separate recorded issue.
+
+### Previous checkpoint (third replay)
+
 Current stop: third replay bb37036. Only PLAN.md conflicted, in the handoff list. Retained the newer November 13 and upstream Whiteboard handoffs and updated the November 11 entry from the incoming commit. Source changes applied without conflicts. The final commit 89c06dd remains to replay. Stage tracked resolutions (git add -u) and continue locally; .git remains read-only in this agent environment. Focused Goose/rebase/question/venv tests and whitespace check executed; result recorded in the handoff below.
 
 ### Previous checkpoint (second replay)
@@ -33,7 +41,13 @@ Continue the user-started rebase of goose_support (original tip 67bc4d4) onto ma
 
 ## Checkpoint
 
-Current: the user continued through ccc76e4 (now a4e6d88). The third replay, 6983b63, stopped only in PLAN.md. Resolved its five additive conflict blocks, retaining upstream active work/completed tasks/bugs/handoffs as well as Goose review and fix records. The source fixes applied without conflicts. `PYTHONPATH=tests python3 -m unittest test_agent_goose_history test_agent_rebase_contract`: 18 passed. `git diff --check`: passed. One commit (67bc4d4) remains to replay.
+Current: the user continued through 6983b63 (now bb37036). Final replay 67bc4d4 stopped only in PLAN.md. Its five additive conflict blocks are resolved, preserving all upstream and Goose entries; excess blank lines were normalized. All source changes, including snapshot retention, reply discovery, capability parity and unread-observation guards, applied without conflicts. No rebase commands remain after this pending commit. Git still needs to stage this resolution and finalize the rebase locally.
+
+Final combined validation: 170 Python tests passed (agent suites excluding the socket-dependent attachment class, plus the 51 targeted upstream suites listed below). `npm --prefix web run build -- --outDir /tmp/cc-rebase-final-web`, `cargo fmt --check` and `git diff --check` passed. Frontend retains upstream file-link navigation and recall invalidation as well as Goose snapshot refresh/anchor behavior. Rust compilation/Clippy remains unverified because resvg is uncached and crates.io DNS is unavailable; socket/browser/live integration restrictions remain as documented. Ledger-number collisions remain a separate outstanding issue; no immutable identifiers were rewritten.
+
+### Previous checkpoint (third replay)
+
+Current: the user continued through ccc76e4 (now a4e6d88). The third replay, 6983b63, stopped only in PLAN.md. Resolved its five additive conflict blocks, retaining upstream active work/completed tasks/bugs/handoffs as well as Goose review and fix records. The source fixes applied without conflicts. `PYTHONPATH=tests python3 -m unittest test_agent_goose_history test_agent_rebase_contract`: 18 passed. `git diff --check`: passed. At that checkpoint, one commit (67bc4d4) remained to replay.
 
 ### Previous checkpoint (second replay)
 
@@ -53,4 +67,4 @@ Upstream and topic histories independently allocated overlapping task, plan, bug
 - Initial frontend build reported missing roughjs after main added the dependency. `npm --prefix web ci --offline --ignore-scripts --no-audit --no-fund` restored the locked dependencies from cache (82 packages). `npm --prefix web run build -- --outDir /tmp/cc-rebase-web` then passed TypeScript/Vite, with existing import/chunk-size warnings.
 - Clippy attempted: blocked by unavailable crates.io DNS and uncached resvg. Offline retry confirms missing resvg, so no Rust compile/test/Clippy success is claimed.
 
-Git metadata remains read-only here. Next: stage PLAN.md, this task and the dated rebase handoff, then run GIT_EDITOR=true git rebase --continue locally. The current stop has no source conflicts; the final snapshot/history-fix commit still needs replay and validation. Resolve and validate any subsequent conflicts; preserve both upstream features and the remaining Goose fixes. Ledger-number collisions described above remain unresolved.
+Git metadata remains read-only here. Next: stage PLAN.md, this task and the dated rebase handoff, then run GIT_EDITOR=true git rebase --continue locally. The final snapshot/history-fix commit is now applied and validated in the working tree. No commands remain after finalizing this pending commit; keep the task current until Git confirms rebase completion. Resolve and validate any subsequent conflicts; preserve both upstream features and the remaining Goose fixes. Ledger-number collisions described above remain unresolved.

@@ -143,6 +143,41 @@ test('provider capability reasons gate message, approval, close, and restart con
  await expect(page.getByRole('button',{name:'Close agent…',exact:true})).toBeDisabled();
 });
 
+test('Goose snapshot refresh retains older messages and scroll position until a rewrite',async({page})=>{
+ const host=(await(await fetch(`${base}/api/v1/hosts`)).json()).find((h:{id:string})=>h.id==='local');
+ const item={id:'goose-snapshot-fixture',session:'$0',session_name:'fixture',window:'@0',window_name:'goose-project',pane:'%94',project:'/fixture',agent:'goose',prompt:'Live agent',context:'',status:'live',activity:{state:'unknown',source:'none',reason:'Unverified phase',observed_at:1},attention:{key:'e'.repeat(64),instance:'f'.repeat(64),revision:0,finished:false,new_approval:false,unread_reply:false,needs_attention:false}};
+ await page.route('**/api/v1/queue',route=>route.fulfill({json:{checked_at:1,hosts:[{...host,items:[item]}]}}));
+ const messages=Array.from({length:201},(_,index)=>({id:`snapshot-${index}`,role:'assistant',text:`Persisted snapshot message ${index}`,timestamp:'',order_key:String(index).padStart(20,'0')}));
+ let phase:'initial'|'append'|'rewrite'='initial';
+ const views:string[]=[];
+ await page.route('**/agents/conversation?*',route=>{
+  const url=new URL(route.request().url()),cursor=url.searchParams.get('history_cursor'),view=url.searchParams.get('history_view');
+  if(view)views.push(view);
+  const expanded=cursor==='snapshot-page-one'||view==='snapshot-view-two'||phase!=='initial';
+  const revision=phase==='initial'?'r1':phase==='append'?'r2':'r3';
+  return route.fulfill({json:{instance:'f'.repeat(64),context:'',project:'/fixture',provider:'goose',selected:'project-history',association:'project',conversations:[{id:'project-history',session:'native',timestamp:'',linked:false}],send_available:false,attention:false,history_version:revision,history_reset:phase==='rewrite',messages:phase==='rewrite'?[{...messages[200],text:'Rewritten history'}]:expanded?messages.slice(0,phase==='append'?201:200):messages.slice(100,200),activities:[],history_page:{protocol:'cc.history.v1',store_id:'store',session_id:'native',revision,reset:phase==='rewrite',replace:true,view_cursor:expanded?'snapshot-view-two':'snapshot-view-one',next_cursor:expanded?null:'snapshot-page-one'}}});
+ });
+ await page.goto(base+'/#/queue');await page.locator('.queue-card').click();
+ const history=page.getByLabel('Conversation messages');
+ await expect(history.locator('.agent-message')).toHaveCount(100);
+ await page.getByRole('button',{name:'Load older messages',exact:true}).click();
+ await expect(history.locator('.agent-message')).toHaveCount(200);
+ const anchor=history.locator('[data-message-id="snapshot-50"]');
+ await anchor.evaluate(element=>element.scrollIntoView({block:'start'}));
+ const originalTop=(await anchor.boundingBox())!.y;
+ phase='append';
+ await page.getByText('Filters',{exact:true}).click();
+ await page.getByRole('button',{name:'Refresh queue',exact:true}).click();
+ await expect(history.locator('.agent-message')).toHaveCount(201);
+ expect(views).toContain('snapshot-view-two');
+ expect(Math.abs((await anchor.boundingBox())!.y-originalTop)).toBeLessThan(3);
+ await expect(history.locator('[data-message-id="snapshot-0"]')).toHaveCount(1);
+ phase='rewrite';
+ await page.getByRole('button',{name:'Refresh queue',exact:true}).click();
+ await expect(history.locator('.agent-message')).toHaveCount(1);
+ await expect(history).toContainText('Rewritten history');
+});
+
 test('opaque history IDs sort by order key and a reset replaces stale pages',async({page})=>{
  const host=(await(await fetch(`${base}/api/v1/hosts`)).json()).find((h:{id:string})=>h.id==='local');
  const caps={project_history:{available:true,reason:null},ordinary_message_submission:{available:false,reason:'Guarded Goose message submission is unavailable.'}};

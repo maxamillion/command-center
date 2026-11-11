@@ -1,0 +1,7 @@
+# Goose history review fixes
+
+[Task 0053](../tasks/done/0053-goose-history-review-fixes.md) implements fixes for bugs 0020–0022. Snapshot cursors now remain compact, refreshes retain the verified displayed range across appends, destructive edits reset it, and bounded assistant-reply discovery works independently of tool-only display tails. Frontend replacements preserve the visible message anchor; unseen or incomplete reply observations cannot clear attention. Independent Rust/Python capability guards now have exhaustive parity coverage. Milestone/API records reflect the implemented scope.
+
+Verification: 112 Python agent tests and 12 Claude continuation tests passed; 47 Rust library tests passed with two socket-listener tests explicitly excluded after observed sandbox failures, and two binary tests passed. Formatting, Clippy, frontend build and release build passed. Five synthetic pages showed 500 messages with cursor lengths 321–322 bytes (125.24 ms total in this container). Browser regression discovered, but its fixture could not access the isolated tmux socket; standalone Chromium also failed on prohibited socket operations. No live agents/stores, deployment, commit or push.
+
+Next: execute the new Goose snapshot-scroll Playwright test and broader compatibility checks in a socket-capable fixture environment. Task 0032 and native/qualification gates remain open. All review/fix records and source changes remain uncommitted in the shared tree.

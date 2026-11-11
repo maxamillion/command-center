@@ -116,6 +116,13 @@ pub(crate) struct Attention {
     data: Mutex<Data>,
     path: Option<PathBuf>,
 }
+pub(crate) fn parse_reply(value: &serde_json::Value) -> Option<Reply> {
+    if value["limited"] == true {
+        return None;
+    }
+    serde_json::from_value(value.clone()).ok()
+}
+
 impl Attention {
     pub fn new(path: Option<PathBuf>) -> anyhow::Result<Self> {
         let data = match &path {
@@ -541,6 +548,59 @@ mod tests {
             reply_cursor: view.reply_cursor.clone(),
         }
     }
+    #[tokio::test]
+    async fn incomplete_reply_scan_does_not_baseline_or_clear_attention() {
+        let store = Attention::new(None).unwrap();
+        let incomplete =
+            serde_json::json!({"conversation":"thread","version":"partial", "limited":true});
+        store
+            .observe(
+                ("agent", "host"),
+                Some("process"),
+                &activity("unknown", "none"),
+                parse_reply(&incomplete),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        let baseline = store
+            .observe(
+                ("agent", "host"),
+                Some("process"),
+                &activity("unknown", "none"),
+                opaque_reply("baseline", "00000000000000000001:000000", false),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!baseline.unread());
+        store
+            .observe(
+                ("agent", "host"),
+                Some("process"),
+                &activity("unknown", "none"),
+                opaque_reply("new", "00000000000000000002:000000", false),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .observe(
+                ("agent", "host"),
+                Some("process"),
+                &activity("unknown", "none"),
+                parse_reply(&incomplete),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(store.view("agent").await.unread_reply);
+    }
+
     #[tokio::test]
     async fn first_history_is_read_and_old_ack_cannot_clear_new_events() {
         let store = Attention::new(None).unwrap();

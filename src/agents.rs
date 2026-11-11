@@ -89,13 +89,14 @@ pub(crate) struct Target {
     pub(crate) conversation: Option<String>,
     pub(crate) before: Option<u64>,
     pub(crate) history_cursor: Option<String>,
+    pub(crate) history_view: Option<String>,
     pub(crate) known_version: Option<String>,
     pub(crate) known_branch: Option<String>,
 }
 impl Target {
     pub(crate) fn request(&self) -> Value {
         json!({"session":self.session,"window":self.window,"pane":self.pane,
-               "conversation":self.conversation,"before":self.before,"history_cursor":self.history_cursor,"known_version":self.known_version,"known_branch":self.known_branch,"action":"details"})
+               "conversation":self.conversation,"before":self.before,"history_cursor":self.history_cursor,"history_view":self.history_view,"known_version":self.known_version,"known_branch":self.known_branch,"action":"details"})
     }
     pub(crate) fn is_latest(&self) -> bool {
         self.before.is_none() && self.history_cursor.is_none()
@@ -223,7 +224,13 @@ pub(crate) async fn conversation(
         .history_cursor
         .as_ref()
         .is_some_and(|cursor| cursor.len() > 1024)
+        || target
+            .history_view
+            .as_ref()
+            .is_some_and(|cursor| cursor.len() > 1024)
         || (target.history_cursor.is_some() && target.before.is_some())
+        || (target.history_view.is_some()
+            && (target.history_cursor.is_some() || target.before.is_some()))
     {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
@@ -285,7 +292,7 @@ pub(crate) async fn conversation(
     let attention =
         !value["approval"].is_null() || activity.state == crate::queue::AgentState::Approval;
     if target.is_latest() {
-        let reply = serde_json::from_value::<crate::attention::Reply>(value["reply"].clone()).ok();
+        let reply = crate::attention::parse_reply(&value["reply"]);
         let view = state
             .attention
             .observe(
@@ -298,6 +305,11 @@ pub(crate) async fn conversation(
             )
             .await?;
         value["read_state"] = json!(view);
+        if provider == "goose" && value["reply"]["displayed"] != true {
+            // Observing a reply for attention does not mean it was rendered in
+            // the selected bounded history view. Never acknowledge unseen text.
+            value["read_state"]["reply_cursor"] = Value::Null;
+        }
     }
     if let Some(observation) = value
         .as_object_mut()
@@ -661,6 +673,71 @@ pub(crate) async fn approval(
 #[cfg(test)]
 mod capability_tests {
     use super::*;
+
+    #[test]
+    fn python_and_rust_capability_contracts_agree_exhaustively() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("python3")
+            .args([
+                "-c",
+                r#"
+import sys,json
+ns={'__name__':'cc_capability_contract'}
+exec(compile(sys.stdin.read(),'<helper>','exec'),ns)
+result={}
+for provider in ns['PROVIDER_CAPABILITIES']:
+    result[provider]=ns['capability_payload'](provider)
+    for name,capability in result[provider].items():
+        try:
+            ns['require_capability'](provider,name)
+            assert capability['available']
+        except ns['Failure'] as error:
+            assert not capability['available'] and error.status==409
+print(json.dumps(result))
+"#,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(include_bytes!("agent_remote.py"))
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let payload: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(payload.as_object().unwrap().len(), 4);
+        for provider in ["codex", "claude", "pi", "goose"] {
+            let capabilities = payload[provider].as_object().unwrap();
+            assert_eq!(capabilities.len(), CAPABILITY_NAMES.len());
+            for name in CAPABILITY_NAMES {
+                let available = capability_available(provider, name);
+                assert_eq!(
+                    capabilities[name]["available"], available,
+                    "{provider}/{name}"
+                );
+                assert_eq!(require_capability(provider, name).is_ok(), available);
+                if available {
+                    assert!(capabilities[name]["reason"].is_null());
+                } else {
+                    assert!(
+                        capabilities[name]["reason"]
+                            .as_str()
+                            .is_some_and(|s| !s.is_empty())
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn goose_history_is_read_only_and_only_reviewed_close_is_available() {

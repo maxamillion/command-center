@@ -283,7 +283,7 @@ pub(crate) async fn snapshot(State(state): State<Arc<AppState>>) -> Json<Snapsho
                                     let text = value["context"].as_str().unwrap_or("").to_owned();
                                     let activity = Activity::from_value(&value["activity"], &text);
                                     let instance=value["instance"].as_str().map(str::to_owned);
-                                    let reply=serde_json::from_value::<crate::attention::Reply>(value["reply"].clone()).ok();
+                                    let reply=crate::attention::parse_reply(&value["reply"]);
                                     (text, activity, instance, reply, value["background_tasks"].clone())
                                 }
                                 _ => (String::new(), Activity::unknown("Agent observation unavailable; refresh or open terminal"),None,None,Value::Null),

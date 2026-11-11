@@ -1261,6 +1261,7 @@ mod tests {
                 conversation: Some("conversation".into()),
                 before: None,
                 history_cursor: None,
+                history_view: None,
                 known_version: None,
                 known_branch: None,
             },

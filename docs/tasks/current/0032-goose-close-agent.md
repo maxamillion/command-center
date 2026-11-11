@@ -14,7 +14,7 @@ Reuse existing exact process/topology window-close safeguards for Goose without 
 ## Context and related records
 
 - [Plan 0002](../../plans/0002-goose-agent-parity.md), especially the feature matrix, safety contracts, phase gates and pinned source/doc references.
-- [ADR-0002: direction and authorization](../../decisions/0002-goose-integration-direction.md); its Proposed status is not approval.
+- [ADR-0002: direction and authorization](../../decisions/0002-goose-integration-direction.md); its recorded CC-owned scope is accepted; external producer and approval-channel gates remain conditional.
 - [Resume/update protocol](../../plans/0002-goose-agent-parity.md#execution-tracking-and-handoff). Use the current task paths in the tracker when dependencies move.
 - [Milestone 0002: limited observation](../../milestones/0002-goose-native-observation.md).
 

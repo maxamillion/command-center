@@ -1,6 +1,6 @@
 # Milestone 0002: Useful, honest native Goose observation
 
-Status: Proposed — not started; implementation scope awaiting [Task 0024](../tasks/pending/0024-goose-implementation-scope.md).
+Status: In progress — observation implementation authorized by [Task 0024](../tasks/done/0024-goose-implementation-scope.md); Close-agent acceptance and qualification remain incomplete.
 Plan: [0002](../plans/0002-goose-agent-parity.md).
 
 ## Outcome
@@ -23,6 +23,6 @@ Tasks [0025–0032](../plans/0002-goose-agent-parity.md#execution-tracking-and-h
 
 ## Completion and remaining limits
 
-Not completed; no implementation evidence yet. [Research task 0022](../tasks/done/0022-goose-agent-parity-research.md) and tracking preparation do not satisfy this milestone.
+Not completed; implementation evidence is recorded in tasks 0025–0031, with Close-agent acceptance in current task 0032 and qualification pending in task 0048. [Research task 0022](../tasks/done/0022-goose-agent-parity-research.md) and tracking preparation do not satisfy this milestone.
 
 Verified native session ownership/Ready, messages/Outbox acceptance, exact resume/restart, launch/Board work and approval choices belong to separately gated tasks and [Milestone 0003](0003-goose-full-agent-parity.md). Completing observation does not imply those features, authorize installation/deployment, or change live Board tickets.

@@ -34,6 +34,164 @@ class GooseHistory(unittest.TestCase):
     def page(self,request=None):
         return agent.goose_history_page(self.observation,self.chosen,request or {})
 
+    def test_all_five_pages_fit_the_cursor_contract(self):
+        for index in range(510):
+            fixtures.add_message(self.writer,'20261106_1','user',f'Row {index}',1762400000+index,
+                                 message_id=f'user-{index}')
+        self.writer.commit()
+        result=self.page()
+        seen={message['id'] for message in result['messages']}
+        for _ in range(4):
+            cursor=result['history_page']['next_cursor']
+            self.assertIsNotNone(cursor)
+            self.assertLessEqual(len(cursor),1024)
+            result=self.page({'history_cursor':cursor})
+            self.assertFalse(result['history_reset'])
+            seen.update(message['id'] for message in result['messages'])
+        self.assertEqual(len(seen),500)
+        self.assertIsNone(result['history_page']['next_cursor'])
+
+    def test_new_reply_before_a_tool_only_tail_is_discovered(self):
+        fixtures.add_message(self.writer,'20261106_1','assistant','Baseline',100,message_id='base')
+        self.writer.commit()
+        first=agent.goose_reply_observation(self.observation,self.chosen)
+        fixtures.add_message(self.writer,'20261106_1','assistant','New answer',101,message_id='new')
+        for index in range(101):
+            add_blocks(self.writer,'20261106_1','user',[
+                {'type':'toolResponse','id':str(index),'toolResult':{'status':'success','value':[]}}
+            ],102+index,message_id=f'tool-{index}')
+        self.writer.commit()
+        fresh=agent.goose_reply_observation(self.observation,self.chosen,first['version'],first['reply_order_key'])
+        self.assertNotEqual(fresh['cursor'],first['cursor'])
+        self.assertGreater(fresh['reply_order_key'],first['reply_order_key'])
+        self.assertFalse(fresh['reset'])
+
+    def test_append_refresh_preserves_loaded_pages_and_edit_resets(self):
+        for index in range(230):
+            fixtures.add_message(self.writer,'20261106_1','user',f'Row {index}',1762400000+index,
+                                 message_id=f'user-{index}')
+        self.writer.commit()
+        first=self.page()
+        older=self.page({'history_cursor':first['history_page']['next_cursor']})
+        previous={message['id'] for message in first['messages']+older['messages']}
+        fixtures.add_message(self.writer,'20261106_1','assistant','Fresh answer',1762400300,message_id='fresh')
+        self.writer.commit()
+        refreshed=self.page({'known_version':older['history_version'],
+                             'history_view':older['history_page'].get('view_cursor')})
+        self.assertFalse(refreshed['history_reset'])
+        self.assertTrue(previous.issubset({message['id'] for message in refreshed['messages']}))
+        self.writer.execute('UPDATE messages SET content_json=? WHERE message_id=?',
+                            (json.dumps([{'type':'text','text':'Edited'}]),'user-120'))
+        self.writer.commit()
+        edited=self.page({'known_version':refreshed['history_version'],
+                          'history_view':refreshed['history_page']['view_cursor']})
+        self.assertTrue(edited['history_reset'])
+        self.assertEqual(len(edited['messages']),100)
+
+    def test_snapshot_cursor_is_source_bound_and_rejects_invalid_bounds(self):
+        fixtures.add_message(self.writer,'20261106_1','assistant','Answer',100,message_id='a')
+        self.writer.commit()
+        token=self.page()['history_page']['view_cursor']
+        with agent.GooseSessionStore(self.observation) as store:
+            snapshot=agent.GooseHistorySnapshot(store,self.chosen['session'],'different-source')
+            with self.assertRaises(agent.Failure) as error: snapshot.decode(token)
+            self.assertEqual(error.exception.status,409)
+        for invalid in ('','x'*1025,'cc-history-v1.not-base64'):
+            with self.subTest(invalid=invalid),self.assertRaises(agent.Failure):
+                self.page({'history_view':invalid})
+        for marker in (['-1','1'],['1','0'],['1','9'*20],[True,'1'],['1']):
+            with self.subTest(marker=marker),self.assertRaises(agent.Failure):
+                agent.goose_history_marker(marker)
+
+    def test_snapshot_refresh_deletion_and_reinsertion_reset(self):
+        fixtures.add_message(self.writer,'20261106_1','assistant','Answer',100,message_id='a')
+        self.writer.commit()
+        original=self.page()
+        self.writer.execute('DELETE FROM messages WHERE message_id=?',('a',))
+        fixtures.add_message(self.writer,'20261106_1','assistant','Answer',100,message_id='a')
+        self.writer.commit()
+        changed=self.page({'history_view':original['history_page']['view_cursor']})
+        self.assertTrue(changed['history_reset'])
+        self.assertNotEqual(original['messages'][0]['id'],changed['messages'][0]['id'])
+
+    def test_append_refresh_stays_bounded_after_five_pages(self):
+        for index in range(510):
+            fixtures.add_message(self.writer,'20261106_1','user',str(index),index,message_id=str(index))
+        self.writer.commit()
+        result=self.page()
+        for _ in range(4): result=self.page({'history_cursor':result['history_page']['next_cursor']})
+        for index in range(510,520):
+            fixtures.add_message(self.writer,'20261106_1','user',str(index),index,message_id=str(index))
+        self.writer.commit()
+        refreshed=self.page({'known_version':result['history_version'],
+                             'history_view':result['history_page']['view_cursor']})
+        self.assertFalse(refreshed['history_reset'])
+        self.assertEqual(len(refreshed['messages']),500)
+        self.assertEqual(refreshed['messages'][-1]['text'],'519')
+        self.assertIsNone(refreshed['history_page']['next_cursor'])
+
+    def test_incomplete_reply_scan_preserves_observation_without_claiming_a_reply(self):
+        fixtures.add_message(self.writer,'20261106_1','assistant','Baseline',100,message_id='base')
+        self.writer.commit()
+        baseline=agent.goose_reply_observation(self.observation,self.chosen)
+        for index in range(101):
+            add_blocks(self.writer,'20261106_1','assistant',[
+                {'type':'toolRequest','id':str(index),'toolCall':{'status':'success','value':{'name':'tool','arguments':{}}}}
+            ],101+index,message_id=f'tool-{index}')
+        self.writer.commit()
+        with patch.object(agent,'GOOSE_STORE_MAX_ACTIVITY_ROWS',100):
+            limited=agent.goose_reply_observation(self.observation,self.chosen,baseline['version'],baseline['reply_order_key'])
+        self.assertTrue(limited['limited'])
+        self.assertTrue(limited['unchanged'])
+        self.assertEqual(limited['version'],baseline['version'])
+        self.assertIsNone(limited['cursor'])
+        self.assertFalse(limited['reset'])
+
+    def test_a_reply_outside_the_display_page_is_not_acknowledgeable(self):
+        fixtures.add_message(self.writer,'20261106_1','assistant','Answer',100,message_id='a')
+        for index in range(101):
+            add_blocks(self.writer,'20261106_1','user',[
+                {'type':'toolResponse','id':str(index),'toolResult':{'status':'success','value':[]}}
+            ],101+index,message_id=str(index))
+        self.writer.commit()
+        result=self.page()
+        self.assertIsNotNone(result['reply']['cursor'])
+        self.assertFalse(result['reply']['displayed'])
+        older=self.page({'history_cursor':result['history_page']['next_cursor']})
+        self.assertTrue(older['reply']['displayed'])
+        polled=self.page({'known_version':older['history_version'],
+                          'history_view':older['history_page']['view_cursor']})
+        self.assertTrue(polled['history_unchanged'])
+        self.assertTrue(polled['reply']['displayed'])
+
+    def test_message_range_materialization_enforces_the_byte_budget(self):
+        for index in range(40):
+            fixtures.add_message(self.writer,'20261106_1','assistant','x'*60000,index,message_id=str(index))
+        self.writer.commit()
+        with agent.GooseSessionStore(self.observation) as store:
+            with self.assertRaises(agent.Failure) as error:
+                store.messages(self.chosen['session'],limit=500)
+            self.assertIn('byte budget',error.exception.message)
+        limited=agent.goose_reply_observation(self.observation,self.chosen)
+        self.assertTrue(limited['limited'])
+        self.assertIsNone(limited['cursor'])
+
+    def test_late_persisted_reply_advances_even_when_display_page_is_unchanged(self):
+        fixtures.add_message(self.writer,'20261106_1','assistant','Baseline',100,message_id='base')
+        for index in range(101):
+            add_blocks(self.writer,'20261106_1','user',[
+                {'type':'toolResponse','id':str(index),'toolResult':{'status':'success','value':[]}}
+            ],200+index,message_id=str(index))
+        self.writer.commit()
+        baseline=agent.goose_reply_observation(self.observation,self.chosen)
+        fixtures.add_message(self.writer,'20261106_1','assistant','Late persisted answer',150,message_id='late')
+        self.writer.commit()
+        updated=agent.goose_reply_observation(self.observation,self.chosen,baseline['version'],baseline['reply_order_key'])
+        self.assertEqual(updated['version'],baseline['version'])
+        self.assertNotEqual(updated['cursor'],baseline['cursor'])
+        self.assertFalse(updated['unchanged'])
+        self.assertFalse(updated['reset'])
+
     def test_chat_visibility_audience_hidden_context_and_media_are_projected_safely(self):
         add_blocks(self.writer,'20261106_1','user',[
             {'type':'text','text':'Visible question'},

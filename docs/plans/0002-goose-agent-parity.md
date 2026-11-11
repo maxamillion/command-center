@@ -12,7 +12,7 @@ Current task: [Task 0032: Goose Close agent](../tasks/current/0032-goose-close-a
 - **Scope decision recorded:** the user's 2026-11-06 request authorizes native Goose support in CC, observation first, in the execution task dependency order. See [ADR-0002](../decisions/0002-goose-integration-direction.md) and completed [Task 0024](../tasks/done/0024-goose-implementation-scope.md). CC-owned code and synthetic fixtures are authorized; external producer/approval and live-operation gates are not waived.
 - **Current action:** tasks 0024–0031 are complete; task 0032 is current. Remaining tasks require their prerequisite acceptance evidence and any task-specific accepted decisions. Blocked records 0035/0046 identify concrete external dependencies.
 - All **18 remaining execution records: 1 current, 15 pending, 2 externally blocked**. Tasks 0024–0031 are complete and are no longer pending/current.
-- Outcomes are deliberately separate: [Milestone 0002: limited native observation](../milestones/0002-goose-native-observation.md) and [Milestone 0003: complete native parity](../milestones/0003-goose-full-agent-parity.md), both Proposed/not started.
+- Outcomes are deliberately separate: [Milestone 0002: limited native observation](../milestones/0002-goose-native-observation.md) and [Milestone 0003: complete native parity](../milestones/0003-goose-full-agent-parity.md), observation in progress and full parity proposed; neither is qualified.
 - Latest checkpoint/handoff: [Goose Close agent](../notes/2026-11-09-goose-close-agent.md). It records the B4-close implementation and the current tmux-socket verification blocker.
 
 ### Source of truth and task tracker

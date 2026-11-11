@@ -7,26 +7,17 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 - [Plan 0001: project overview](docs/plans/0001-project-overview.md)
 - [Plan 0002: Goose agent parity](docs/plans/0002-goose-agent-parity.md#execution-tracking-and-handoff) — native observation-first implementation authorized; task 0032 is current.
 - [Milestone 0001: maintainable project records](docs/milestones/0001-maintainable-project-records.md) — complete.
-- [Milestone 0002: Goose observation](docs/milestones/0002-goose-native-observation.md) / [0003: full Goose parity](docs/milestones/0003-goose-full-agent-parity.md) — proposed; distinct acceptance gates.
+- [Milestone 0002: Goose observation](docs/milestones/0002-goose-native-observation.md) / [0003: full Goose parity](docs/milestones/0003-goose-full-agent-parity.md) — observation in progress, full parity proposed; distinct acceptance gates.
 
 ## Active work
 
-
-
-
-
-
-- [Task 0056: Rebase Goose support onto main](docs/tasks/current/0056-goose-main-rebase.md) — resolving conflicts; preserve upstream and Goose records.
+- [Task 0056: Rebase Goose support onto main](docs/tasks/current/0056-goose-main-rebase.md) — final working-tree conflicts resolved and checked; Git continuation pending.
 
 - [Task 0054: Whiteboard attachment release and harness check](docs/tasks/pending/0054-whiteboard-attachment-release-and-harness-check.md) — deployment complete; real-harness delivery validation awaits separate authorization.
 
 - [Plan 0003: guarded Whiteboard attachments](docs/plans/0003-whiteboard-attachments.md) — approved, implemented and deployed; real-harness validation pending.
 
 - [Plan 0002: CC-46 Whiteboard](docs/plans/0002-whiteboard-workspace.md) — lightweight prototype published; shared core deployed; server exports and guarded attachments deployed; real-harness validation pending.
-
-
-
-
 
 - [Task 0009: Pi first-message receipts](docs/tasks/current/0009-pi-first-message-receipts.md) — CC dev; fix deployed, one legacy receipt archive choice pending.
 
@@ -130,6 +121,10 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 
 - [Task 0022: Omarchy theme selector](docs/tasks/done/0022-omarchy-theme-selector.md)
 
+- [Task 0053: Goose history review fixes](docs/tasks/done/0053-goose-history-review-fixes.md) — bugs 0020–0022 fixed; browser integration remains unverified under sandbox restrictions.
+
+- [Task 0052: comprehensive Goose review](docs/tasks/done/0052-goose-comprehensive-review.md) — three reproduced history defects; review requests changes.
+
 - [Task 0051: Goose review fixes](docs/tasks/done/0051-goose-review-fixes.md) — bugs 0017–0019 fixed with regression coverage.
 
 - [Task 0050: Goose branch review](docs/tasks/done/0050-goose-branch-code-review.md) — three reproduced defects; fixed by task 0051.
@@ -196,11 +191,6 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 
 ## Open bugs
 
-
-
-
-
-
 - [Bug 0005: Pi first input unconfirmed](docs/bugs/open/0005-pi-first-input-unconfirmed.md)
 
 ## Fixed bugs
@@ -230,6 +220,10 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 - [Bug 0016: Codex internal records](docs/bugs/fixed/0016-codex-interruption-records-shown-as-human-chat.md)
 
 - [Bug 0015: desktop reload height](docs/bugs/fixed/0015-desktop-reload-button-too-tall.md)
+
+- [Bug 0020: Goose history cursor overflow](docs/bugs/fixed/0020-goose-history-cursor-overflow.md)
+- [Bug 0021: Goose reply hidden by tool tail](docs/bugs/fixed/0021-goose-reply-hidden-by-tool-tail.md)
+- [Bug 0022: Goose appends discard loaded history](docs/bugs/fixed/0022-goose-appends-discard-loaded-history.md)
 
 - [Bug 0019: A tool-only tail clears Goose reply attention](docs/bugs/fixed/0019-goose-tool-tail-clears-unread.md)
 - [Bug 0018: Long tool arguments replace successful Goose results with errors](docs/bugs/fixed/0018-goose-tool-argument-overflow.md)
@@ -276,13 +270,13 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 
 ## Handoff
 
-- [2026-11-13: Goose rebase onto updated main](docs/notes/2026-11-13-goose-main-rebase.md) — third replay handoff conflict resolved; final commit remains to replay.
+- [2026-11-13: Goose rebase onto updated main](docs/notes/2026-11-13-goose-main-rebase.md) — final replay conflicts resolved; 194 Python tests and frontend build pass; local Git continuation pending.
 
 - [2026-11-12: Whiteboard images deployed](docs/notes/2026-11-12-whiteboard-images-deployed.md)
 
 - [2026-11-12: Whiteboard image paste/drop ready](docs/notes/2026-11-12-whiteboard-images-ready.md)
 
-- [2026-11-11: Goose/main rebase](docs/notes/2026-11-11-goose-main-rebase.md) — third replay ledger conflicts resolved in the working tree; final commit still awaits replay.
+- [2026-11-11: Goose/main rebase](docs/notes/2026-11-11-goose-main-rebase.md) — final replay conflicts resolved; 170 Python tests and frontend build pass; Git continuation pending.
 
 - [2026-11-10: exports ready and attachment design](docs/notes/2026-11-10-whiteboard-exports-ready.md)
 
@@ -346,13 +340,15 @@ Read [AGENTS.md](AGENTS.md) and the [work ledger](docs/work-ledger.md) before st
 
 - [2026-11-06: Omarchy theme selector](docs/notes/2026-11-06-omarchy-theme-selector.md)
 
+- [2026-11-10: Goose history fixes](docs/notes/2026-11-10-goose-history-fixes.md) — implementation, regressions and validation limits.
+
+- [2026-11-09: comprehensive Goose review](docs/notes/2026-11-09-goose-comprehensive-review.md) — findings, plan assessment and verification limits.
+
 - [2026-11-09: Goose review fixes](docs/notes/2026-11-09-goose-review-fixes.md) — fixes and validation for bugs 0017–0019.
 
 - [2026-11-09: Goose Close agent](docs/notes/2026-11-09-goose-close-agent.md) — Close-agent capability and isolated Goose fixtures implemented; browser verification awaits a sandbox that permits local tmux sockets.
 
 - [2026-11-08: Goose history projection](docs/notes/2026-11-08-goose-history-projection.md) — historical handoff from task 0030 to 0031.
-
-- [2026-11-06: Goose session store](docs/notes/2026-11-06-goose-session-store.md) — historical checkpoint; superseded by the history-projection handoff above.
 
 - [2026-11-06: Goose provider dispatch](docs/notes/2026-11-06-goose-provider-dispatch.md) — tasks 0024/0025 complete; task 0026 was next.
 
